@@ -32,6 +32,11 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+.env
+backend/.env
+backend/debug/
+backend/omni-backend.log
+backend/node_modules/
 
 # Symbolication related
 app.*.symbols
