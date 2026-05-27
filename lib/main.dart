@@ -1,9 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui';
+import 'dart:ui' as ui;
+
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/rendering.dart';
 import 'package:http/http.dart' as http;
+import 'dart:math' as math;
+
 
 List<CameraDescription> cameras = [];
 
@@ -11,6 +17,27 @@ const String omniSearchEndpoint = String.fromEnvironment(
   'OMNI_BACKEND_URL',
   defaultValue: 'http://10.0.2.2:3000/api/visual-search',
 );
+
+const MethodChannel _nativeChannel = MethodChannel('com.example.omni_app/native');
+
+bool isProductPhonePeEnabled(OmniProduct product, List<OmniProduct> categoryProducts) {
+  if (product.categoryId == 'other') return false;
+  final index = categoryProducts.indexOf(product);
+  
+  final int seed = product.categoryId.hashCode;
+  
+  if (product.categoryId == 'indian_ecommerce') {
+    if (index < 0 || index >= 5) return false;
+    final int count = 2 + (seed.abs() % 4); // Min 2, Max 5
+    return index < count;
+  } else {
+    if (index < 0 || index >= 3) return false;
+    final int count = 1 + (seed.abs() % 3); // Min 1, Max 3
+    return index < count;
+  }
+}
+
+
 
 Future<void> main() async {
 
@@ -508,6 +535,19 @@ class OmniProduct {
           json['categoryTitle']?.toString() ?? 'Other Matches',
     );
   }
+
+  OmniProduct copyWith({String? price}) {
+    return OmniProduct(
+      title: title,
+      image: image,
+      price: price ?? this.price,
+      source: source,
+      shoppingLink: shoppingLink,
+      domain: domain,
+      categoryId: categoryId,
+      categoryTitle: categoryTitle,
+    );
+  }
 }
 
 class OmniCategory {
@@ -751,7 +791,8 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
       );
 
       final streamedResponse = await request.send().timeout(
-        const Duration(seconds: 35),
+        const Duration(seconds: 60),
+
         onTimeout: () {
           throw TimeoutException(
             'The backend did not respond in time. Check Wi-Fi/firewall.',
@@ -771,31 +812,31 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final categoriesJson = data['categories'];
 
+      List<OmniCategory> parsedCategories = [];
+
       if (categoriesJson is List) {
-        return categoriesJson
+        parsedCategories = categoriesJson
             .whereType<Map<String, dynamic>>()
             .map(OmniCategory.fromJson)
             .toList();
+      } else {
+        final productsJson = data['products'];
+        if (productsJson is List) {
+          final products = productsJson
+              .whereType<Map<String, dynamic>>()
+              .map(OmniProduct.fromJson)
+              .toList();
+          parsedCategories = [
+            OmniCategory(
+              id: 'all',
+              title: 'All Matches',
+              products: products,
+            ),
+          ];
+        }
       }
 
-      final productsJson = data['products'];
-
-      if (productsJson is! List) {
-        return [];
-      }
-
-      final products = productsJson
-          .whereType<Map<String, dynamic>>()
-          .map(OmniProduct.fromJson)
-          .toList();
-
-      return [
-        OmniCategory(
-          id: 'all',
-          title: 'All Matches',
-          products: products,
-        ),
-      ];
+      return _fillMissingPhonePePrices(parsedCategories);
     } finally {
       await resumeCameraPreview();
 
@@ -805,6 +846,88 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
         });
       }
     }
+  }
+
+  bool _hasPriceFetched(OmniProduct product) {
+    if (product.price.isEmpty) return false;
+    final cleaned = product.price.replaceAll(RegExp(r'[^\d.]'), '');
+    return double.tryParse(cleaned) != null;
+  }
+
+  double? _parsePriceToDouble(String priceStr) {
+    if (priceStr.isEmpty) return null;
+    final cleaned = priceStr.replaceAll(RegExp(r'[^\d.]'), '');
+    return double.tryParse(cleaned);
+  }
+
+  List<OmniCategory> _fillMissingPhonePePrices(List<OmniCategory> categories) {
+    final result = <OmniCategory>[];
+
+    for (final category in categories) {
+      final products = category.products;
+      final phonePeProducts = <OmniProduct>[];
+      final missingPricePhonePeProducts = <OmniProduct>[];
+      final fetchedPrices = <double>[];
+
+      for (final product in products) {
+        final hasPhonePe = isProductPhonePeEnabled(product, products);
+        if (hasPhonePe) {
+          phonePeProducts.add(product);
+          if (!_hasPriceFetched(product)) {
+            missingPricePhonePeProducts.add(product);
+          }
+        }
+        
+        if (_hasPriceFetched(product)) {
+          final parsedPrice = _parsePriceToDouble(product.price);
+          if (parsedPrice != null) {
+            fetchedPrices.add(parsedPrice);
+          }
+        }
+      }
+
+      if (missingPricePhonePeProducts.isEmpty) {
+        result.add(category);
+        continue;
+      }
+
+      double avgPrice;
+      if (fetchedPrices.isNotEmpty) {
+        final sum = fetchedPrices.reduce((a, b) => a + b);
+        avgPrice = sum / fetchedPrices.length;
+      } else {
+        avgPrice = 1000.0 + math.Random().nextInt(9001);
+      }
+
+      final updatedProducts = <OmniProduct>[];
+      for (final product in products) {
+        final hasPhonePe = isProductPhonePeEnabled(product, products);
+        final isPriceFetched = _hasPriceFetched(product);
+        
+        if (hasPhonePe && !isPriceFetched) {
+          double discountPct;
+          if (missingPricePhonePeProducts.length == 1) {
+            discountPct = 0.12;
+          } else {
+            discountPct = (math.Random().nextDouble() * 15.0) / 100.0;
+          }
+          
+          final calculatedPrice = avgPrice * (1.0 - discountPct);
+          final formattedPrice = "₹${calculatedPrice.toStringAsFixed(0)}";
+          updatedProducts.add(product.copyWith(price: formattedPrice));
+        } else {
+          updatedProducts.add(product);
+        }
+      }
+
+      result.add(OmniCategory(
+        id: category.id,
+        title: category.title,
+        products: updatedProducts,
+      ));
+    }
+
+    return result;
   }
 
   String? readErrorMessage(String body) {
@@ -1138,10 +1261,11 @@ class OmniProductsSheet extends StatelessWidget {
           const SizedBox(height: 12),
 
           SizedBox(
-            height: 164,
+            height: 182,
             child: products.isEmpty
                 ? emptyCategoryCard()
                 : ListView.separated(
+
                     scrollDirection: Axis.horizontal,
                     itemCount: visibleProducts.length + 1,
                     separatorBuilder: (_, __) {
@@ -1152,7 +1276,9 @@ class OmniProductsSheet extends StatelessWidget {
                         return viewCategoryButton(context, category);
                       }
 
-                      return railProductCard(visibleProducts[index]);
+                      final product = visibleProducts[index];
+                      final hasPhonePe = isProductPhonePeEnabled(product, products);
+                      return railProductCard(context, product, hasPhonePe);
                     },
                   ),
           ),
@@ -1182,73 +1308,133 @@ class OmniProductsSheet extends StatelessWidget {
     );
   }
 
-  Widget railProductCard(OmniProduct product) {
-    return Container(
-      width: 126,
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: cardBackground,
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.08),
-            blurRadius: 10,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-
-          productImage(106, 72, product),
-
-          const SizedBox(height: 9),
-
-          Text(
-            product.title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: textDark,
-              fontSize: 13,
-              height: 1.18,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-
-          const SizedBox(height: 5),
-
-          Text(
-            product.source.isEmpty ? product.domain : product.source,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: textMuted,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-
-          if (product.price.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              product.price,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: plum,
-                fontSize: 12,
-                fontWeight: FontWeight.w900,
+  Widget railProductCard(BuildContext context, OmniProduct product, bool hasPhonePe) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          if (hasPhonePe) {
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (context) => PhonePeCheckoutScreen(product: product),
               ),
-            ),
-          ],
-        ],
+            );
+          } else {
+            _nativeChannel.invokeMethod('launchUrl', {'url': product.shoppingLink});
+          }
+        },
+        borderRadius: BorderRadius.circular(18),
+        child: Container(
+          width: 126,
+          padding: const EdgeInsets.all(9),
+          decoration: BoxDecoration(
+            color: cardBackground,
+            borderRadius: BorderRadius.circular(18),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.08),
+                blurRadius: 10,
+                offset: const Offset(0, 5),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Stack(
+                children: [
+                  productImage(106, 68, product),
+                  if (hasPhonePe)
+                    Positioned(
+                      top: 4,
+                      right: 4,
+                      child: Container(
+                        width: 22,
+                        height: 22,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF5F259F), // PhonePe Purple
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 1.5),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.25),
+                              blurRadius: 3,
+                              offset: const Offset(0, 1.5),
+                            ),
+                          ],
+                        ),
+                        child: const Center(
+                          child: Text(
+                            'पे',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w900,
+                              fontFamily: 'Roboto',
+                              height: 1.0,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.start,
+                  children: [
+                    Text(
+                      product.title,
+                      maxLines: 2,
+                      softWrap: true,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: textDark,
+                        fontSize: 13,
+                        height: 1.18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      product.source.isEmpty ? product.domain : product.source,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: textMuted,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (product.price.isNotEmpty) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        product.price,
+                        maxLines: 1,
+                        softWrap: false,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: plum,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 
   Widget viewCategoryButton(
+
     BuildContext context,
     OmniCategory category,
   ) {
@@ -1528,10 +1714,12 @@ class CategoryProductsPage extends StatelessWidget {
                   crossAxisCount: 2,
                   crossAxisSpacing: 12,
                   mainAxisSpacing: 12,
-                  childAspectRatio: 0.72,
+                  childAspectRatio: 0.68,
                 ),
                 itemBuilder: (context, index) {
-                  return categoryProductCard(products[index]);
+                  final product = products[index];
+                  final hasPhonePe = isProductPhonePeEnabled(product, category.products);
+                  return categoryProductCard(context, product, hasPhonePe);
                 },
               ),
             ),
@@ -1541,99 +1729,145 @@ class CategoryProductsPage extends StatelessWidget {
     );
   }
 
-  Widget categoryProductCard(OmniProduct product) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: cardBackground,
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.08),
-            blurRadius: 12,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-
-          OmniProductsSheet.productImage(
-            double.infinity,
-            112,
-            product,
-          ),
-
-          const SizedBox(height: 10),
-
-          Text(
-            product.title,
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: textDark,
-              fontSize: 14,
-              height: 1.18,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-
-          const SizedBox(height: 6),
-
-          Text(
-            product.source.isEmpty ? product.domain : product.source,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: textMuted,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-
-          const Spacer(),
-
-          Row(
-            children: [
-
-              Expanded(
-                child: Text(
-                  product.price.isEmpty ? "View item" : product.price,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: plum,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
+  Widget categoryProductCard(BuildContext context, OmniProduct product, bool hasPhonePe) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          if (hasPhonePe) {
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (context) => PhonePeCheckoutScreen(product: product),
               ),
-
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 11,
-                  vertical: 7,
-                ),
-                decoration: BoxDecoration(
-                  color: plum,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: const Text(
-                  "View",
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
+            );
+          } else {
+            _nativeChannel.invokeMethod('launchUrl', {'url': product.shoppingLink});
+          }
+        },
+        borderRadius: BorderRadius.circular(18),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: cardBackground,
+            borderRadius: BorderRadius.circular(18),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.08),
+                blurRadius: 12,
+                offset: const Offset(0, 6),
               ),
             ],
           ),
-        ],
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Stack(
+                children: [
+                  OmniProductsSheet.productImage(
+                    double.infinity,
+                    112,
+                    product,
+                  ),
+                  if (hasPhonePe)
+                    Positioned(
+                      top: 6,
+                      right: 6,
+                      child: Container(
+                        width: 24,
+                        height: 24,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF5F259F), // PhonePe Purple
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 1.5),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.25),
+                              blurRadius: 3,
+                              offset: const Offset(0, 1.5),
+                            ),
+                          ],
+                        ),
+                        child: const Center(
+                          child: Text(
+                            'पे',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w900,
+                              fontFamily: 'Roboto',
+                              height: 1.0,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                product.title,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: textDark,
+                  fontSize: 14,
+                  height: 1.18,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                product.source.isEmpty ? product.domain : product.source,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: textMuted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Spacer(),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      product.price.isEmpty ? "View item" : product.price,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: plum,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 11,
+                      vertical: 7,
+                    ),
+                    decoration: BoxDecoration(
+                      color: plum,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: const Text(
+                      "View",
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
+
 }
 
 class OmniSheetMessage extends StatelessWidget {
@@ -1960,3 +2194,855 @@ class ScannerCornerPainter extends CustomPainter {
         oldDelegate.color != color;
   }
 }
+
+// ==========================================
+// PHONEPE PARTNER CHECKOUT FLOW IMPLEMENTATION
+// ==========================================
+
+class PhonePeCheckoutScreen extends StatefulWidget {
+  final OmniProduct product;
+  const PhonePeCheckoutScreen({super.key, required this.product});
+
+  @override
+  State<PhonePeCheckoutScreen> createState() => _PhonePeCheckoutScreenState();
+}
+
+class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
+  bool isLoading = true;
+  String name = 'Prekshit';
+  String address = '246, Green Glen Layout, Belandur, Bangalore';
+  String contact = '9999888822';
+  String creditCard = '**** **** **** *007';
+  
+  String selectedPayment = 'PhonePe Credit Card • 1007';
+  bool isProcessingPayment = false;
+
+  late String deliveryTime;
+
+  @override
+  void initState() {
+    super.initState();
+    _calculateDeliveryTime();
+    _fetchUserProfile();
+  }
+
+  void _calculateDeliveryTime() {
+    final catId = widget.product.categoryId;
+    final r = widget.product.title.hashCode.abs();
+    if (catId == 'quick_commerce') {
+      final mins = 15 + (r % 45);
+      deliveryTime = "$mins mins";
+    } else if (catId == 'indian_ecommerce' || catId == 'second_hand') {
+      final days = 2 + (r % 6);
+      deliveryTime = "$days days";
+    } else if (catId == 'bulk') {
+      final days = 7 + (r % 9);
+      deliveryTime = "$days days";
+    } else if (catId == 'international') {
+      final days = 15 + (r % 16);
+      deliveryTime = "$days days";
+    } else {
+      deliveryTime = "4 days";
+    }
+  }
+
+  Future<void> _fetchUserProfile() async {
+    try {
+      final profileUrl = omniSearchEndpoint.replaceAll('/visual-search', '/user-profile');
+      final res = await http.get(Uri.parse(profileUrl)).timeout(const Duration(seconds: 4));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        setState(() {
+          name = data['name'] ?? name;
+          address = data['address'] ?? address;
+          contact = data['contact'] ?? contact;
+          creditCard = data['creditCard'] ?? creditCard;
+          isLoading = false;
+        });
+        return;
+      }
+    } catch (_) {
+      // Fallback on error/offline
+    }
+    setState(() {
+      isLoading = false;
+    });
+  }
+
+  void _processPayment() {
+    setState(() {
+      isProcessingPayment = true;
+    });
+    Future.delayed(const Duration(milliseconds: 2200), () {
+      setState(() {
+        isProcessingPayment = false;
+      });
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (context) => PaymentSuccessScreen(
+            product: widget.product,
+            deliveryTime: deliveryTime,
+            paymentMethod: selectedPayment,
+            name: name,
+            address: address,
+            contact: contact,
+          ),
+        ),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const Color plum = Color(0xFF360816);
+    
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        elevation: 0,
+        backgroundColor: plum,
+        title: const Text('PhonePe Checkout', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
+      body: Stack(
+        children: [
+          isLoading
+              ? const Center(child: CircularProgressIndicator(color: plum))
+              : SingleChildScrollView(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildHeader('Delivery Address'),
+                      Card(
+                        color: Colors.white,
+                        elevation: 2,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  const Icon(Icons.person, color: plum, size: 20),
+                                  const SizedBox(width: 8),
+                                  Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Icon(Icons.location_on, color: plum, size: 20),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(address, style: const TextStyle(color: Colors.black87, height: 1.3)),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Row(
+                                children: [
+                                  const Icon(Icons.phone, color: plum, size: 20),
+                                  const SizedBox(width: 8),
+                                  Text(contact, style: const TextStyle(color: Colors.black87)),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+
+                      _buildHeader('Product Details'),
+                      Card(
+                        color: Colors.white,
+                        elevation: 2,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 70,
+                                height: 70,
+                                clipBehavior: Clip.antiAlias,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF7F0E2),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: widget.product.image.isEmpty
+                                    ? const Icon(Icons.shopping_bag, color: plum)
+                                    : Image.network(
+                                        widget.product.image,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) => const Icon(Icons.shopping_bag, color: plum),
+                                      ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      widget.product.title,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          widget.product.price,
+                                          style: const TextStyle(color: plum, fontWeight: FontWeight.bold, fontSize: 15),
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                          decoration: BoxDecoration(
+                                            color: plum.withOpacity(0.08),
+                                            borderRadius: BorderRadius.circular(8),
+                                          ),
+                                          child: Text(
+                                            widget.product.categoryTitle,
+                                            style: const TextStyle(color: plum, fontSize: 11, fontWeight: FontWeight.bold),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+
+                      Card(
+                        color: plum.withOpacity(0.04),
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.local_shipping, color: plum),
+                              const SizedBox(width: 10),
+                              const Text('Estimated Delivery: ', style: TextStyle(fontWeight: FontWeight.w600)),
+                              Text(deliveryTime, style: const TextStyle(color: plum, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+
+                      _buildHeader('Select Option to Pay'),
+                      Column(
+                        children: [
+                          _buildPaymentRadio('PhonePe UPI', Icons.account_balance_wallet),
+                          _buildPaymentRadio('PhonePe Wallet', Icons.wallet_giftcard),
+                          _buildPaymentRadio('UPI Lite', Icons.bolt),
+                          _buildPaymentRadio('PhonePe Credit Card • 1007', Icons.credit_card),
+                        ],
+                      ),
+                      const SizedBox(height: 32),
+
+                      SizedBox(
+                        width: double.infinity,
+                        height: 52,
+                        child: ElevatedButton(
+                          onPressed: _processPayment,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: plum,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                          child: Text(
+                            'Pay Total: ${widget.product.price.isEmpty ? "₹0" : widget.product.price}',
+                            style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                    ],
+                  ),
+                ),
+          if (isProcessingPayment)
+            Container(
+              color: Colors.black54,
+              child: const Center(
+                child: Card(
+                  color: Colors.white,
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(color: plum),
+                        SizedBox(height: 16),
+                        Text(
+                          'Processing Payment via PhonePe...',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 4, bottom: 8),
+      child: Text(
+        title,
+        style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF6E6257)),
+      ),
+    );
+  }
+
+  Widget _buildPaymentRadio(String value, IconData icon) {
+    final isSelected = selectedPayment == value;
+    return Card(
+      color: Colors.white,
+      elevation: isSelected ? 2 : 0.5,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(
+          color: isSelected ? const Color(0xFF5F259F) : Colors.grey.shade200,
+          width: isSelected ? 1.5 : 1,
+        ),
+      ),
+      margin: const EdgeInsets.only(bottom: 10),
+      child: RadioListTile<String>(
+        value: value,
+        groupValue: selectedPayment,
+        activeColor: const Color(0xFF5F259F),
+        title: Row(
+          children: [
+            Icon(icon, color: isSelected ? const Color(0xFF5F259F) : Colors.grey, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                value,
+                style: TextStyle(
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                  color: isSelected ? const Color(0xFF5F259F) : Colors.black87,
+                ),
+              ),
+            ),
+          ],
+        ),
+
+        onChanged: (String? val) {
+          if (val != null) {
+            setState(() {
+              selectedPayment = val;
+            });
+          }
+        },
+      ),
+    );
+  }
+}
+
+class PaymentSuccessScreen extends StatelessWidget {
+  final OmniProduct product;
+  final String deliveryTime;
+  final String paymentMethod;
+  final String name;
+  final String address;
+  final String contact;
+
+  const PaymentSuccessScreen({
+    super.key,
+    required this.product,
+    required this.deliveryTime,
+    required this.paymentMethod,
+    required this.name,
+    required this.address,
+    required this.contact,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const Color plum = Color(0xFF360816);
+    const Color phonepePurple = Color(0xFF5F259F);
+
+    return Scaffold(
+      backgroundColor: Colors.white,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              const Spacer(),
+              Container(
+                width: 96,
+                height: 96,
+                decoration: BoxDecoration(
+                  color: phonepePurple,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: phonepePurple.withOpacity(0.35),
+                      blurRadius: 20,
+                      spreadRadius: 4,
+                      offset: const Offset(0, 8),
+                    )
+                  ],
+                ),
+                child: const Icon(
+                  Icons.check,
+                  color: Colors.white,
+                  size: 56,
+                ),
+              ),
+              const SizedBox(height: 32),
+              const Text(
+                'Payment Successful',
+                style: TextStyle(
+                  color: phonepePurple,
+                  fontSize: 24,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: -0.5,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Your order has been placed successfully!',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.grey,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 36),
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade50,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.grey.shade200),
+                ),
+                child: Column(
+                  children: [
+                    _buildSummaryRow('Amount Paid', product.price.isEmpty ? '₹0' : product.price, isBold: true),
+                    const Divider(height: 24),
+                    _buildSummaryRow('Transaction ID', 'TXN${DateTime.now().millisecondsSinceEpoch.toString().substring(3)}'),
+                    const SizedBox(height: 10),
+                    _buildSummaryRow('Payment Via', paymentMethod.split(RegExp(r' [•(]')).first),
+                    const SizedBox(height: 10),
+                    _buildSummaryRow('Delivery Estimate', deliveryTime, valColor: plum, valBold: true),
+                  ],
+                ),
+              ),
+              const Spacer(),
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) => InvoiceScreen(
+                          product: product,
+                          deliveryTime: deliveryTime,
+                          paymentMethod: paymentMethod,
+                          name: name,
+                          address: address,
+                          contact: contact,
+                        ),
+                      ),
+                    );
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: plum,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text(
+                    'View Invoice',
+                    style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummaryRow(String label, String value, {bool isBold = false, Color? valColor, bool valBold = false}) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w600, fontSize: 14),
+        ),
+        Text(
+          value,
+          style: TextStyle(
+            fontWeight: (isBold || valBold) ? FontWeight.bold : FontWeight.normal,
+            color: valColor ?? (isBold ? Colors.black : Colors.black87),
+            fontSize: isBold ? 16 : 14,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class InvoiceScreen extends StatelessWidget {
+  final OmniProduct product;
+  final String deliveryTime;
+  final String paymentMethod;
+  final String name;
+  final String address;
+  final String contact;
+
+  InvoiceScreen({
+    super.key,
+    required this.product,
+    required this.deliveryTime,
+    required this.paymentMethod,
+    required this.name,
+    required this.address,
+    required this.contact,
+  });
+
+  final GlobalKey _boundaryKey = GlobalKey();
+
+  Future<void> _downloadInvoicePng(BuildContext context) async {
+    try {
+      RenderRepaintBoundary? boundary = _boundaryKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null) throw Exception('Boundary not found');
+      
+      ui.Image image = await boundary.toImage(pixelRatio: 3.0);
+      ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      Uint8List? pngBytes = byteData?.buffer.asUint8List();
+      
+      if (pngBytes == null) throw Exception('Failed to encode PNG');
+
+      final orderId = _getOrderId();
+      final fileName = "Omni_Order_${orderId}.png";
+      
+      final bool? success = await _nativeChannel.invokeMethod<bool>('saveImageToDownloads', {
+        'bytes': pngBytes,
+        'fileName': fileName,
+      });
+
+      if (success == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: const Color(0xFF360816),
+            behavior: SnackBarBehavior.floating,
+            content: Text('Successfully downloaded: $fileName inside Downloads folder!'),
+          ),
+        );
+      } else {
+        throw Exception('Native storage write returned false');
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: Colors.redAccent,
+          behavior: SnackBarBehavior.floating,
+          content: Text('Failed to download receipt: $e'),
+        ),
+      );
+    }
+  }
+
+  void _shareInvoiceText() {
+    final orderId = _getOrderId();
+    final text = """
+========================================
+       OMNI RETAIL ORDER INVOICE
+========================================
+Order ID: #$orderId
+Date: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}
+
+CUSTOMER INFORMATION
+--------------------
+Name: $name
+Address: $address
+Contact: $contact
+
+PRODUCT SUMMARY
+---------------
+Product: ${product.title}
+Source: ${product.source.isEmpty ? product.domain : product.source}
+Amount: ${product.price}
+Est. Delivery: $deliveryTime
+
+PAYMENT INFORMATION
+-------------------
+Method: ${paymentMethod.split(RegExp(r' [•(]')).first}
+Status: Successful
+
+Thank you for choosing PhonePe Partner Checkout!
+========================================
+""";
+    _nativeChannel.invokeMethod('shareInvoice', {'text': text});
+  }
+
+  String _getOrderId() {
+    final int hash = (product.title + name).hashCode.abs();
+    return "OMN-${hash.toString().substring(0, 6)}";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const Color plum = Color(0xFF360816);
+    final orderId = _getOrderId();
+
+    return Scaffold(
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(
+        elevation: 0,
+        backgroundColor: plum,
+        title: const Text('Order Invoice', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: Center(
+                child: RepaintBoundary(
+                  key: _boundaryKey,
+                  child: Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.06),
+                          blurRadius: 16,
+                          offset: const Offset(0, 8),
+                        )
+                      ],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text(
+                              'INVOICE',
+                              style: TextStyle(
+                                color: plum,
+                                fontSize: 22,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 0.8,
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.green.shade50,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                'PAID',
+                                style: TextStyle(
+                                  color: Colors.green.shade700,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'Order ID: #$orderId',
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.black87),
+                            ),
+                            Text(
+                              'Date: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}',
+                              style: const TextStyle(fontSize: 12, color: Colors.grey),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        const Divider(thickness: 1),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'DELIVERY DETAILS',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Colors.grey),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          name,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          address,
+                          style: const TextStyle(fontSize: 13, color: Colors.black87, height: 1.3),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Contact: $contact',
+                          style: const TextStyle(fontSize: 13, color: Colors.black54),
+                        ),
+                        const SizedBox(height: 12),
+                        const Divider(thickness: 1),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'ORDER DETAILS',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Colors.grey),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              flex: 3,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    product.title,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    'Source: ${product.source.isEmpty ? product.domain : product.source}',
+                                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              flex: 1,
+                              child: Text(
+                                product.price,
+                                textAlign: TextAlign.right,
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: plum),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        const Divider(thickness: 1),
+                        const SizedBox(height: 12),
+                        _buildInvoiceItemRow('Payment Method', paymentMethod.split(RegExp(r' [•(]')).first),
+                        const SizedBox(height: 6),
+                        _buildInvoiceItemRow('Est. Delivery Time', deliveryTime),
+                        const SizedBox(height: 16),
+                        const Divider(thickness: 1.5),
+                        const SizedBox(height: 12),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text(
+                              'TOTAL PAID',
+                              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: Colors.black),
+                            ),
+                            Text(
+                              product.price,
+                              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: plum),
+                            ),
+
+                          ],
+                        ),
+                        const SizedBox(height: 18),
+                        Center(
+                          child: Text(
+                            'Thank you for your purchase!',
+                            style: TextStyle(color: Colors.grey.shade400, fontStyle: FontStyle.italic, fontSize: 12),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              border: Border(top: BorderSide(color: Color(0xFFEEEEEE))),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 48,
+                    child: OutlinedButton.icon(
+                      onPressed: () => _downloadInvoicePng(context),
+                      icon: const Icon(Icons.download, color: plum),
+                      label: const Text('Download', style: TextStyle(color: plum, fontWeight: FontWeight.bold)),
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: plum),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: SizedBox(
+                    height: 48,
+                    child: ElevatedButton.icon(
+                      onPressed: _shareInvoiceText,
+                      icon: const Icon(Icons.share, color: Colors.white),
+                      label: const Text('Share Invoice', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: plum,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInvoiceItemRow(String label, String value) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(label, style: const TextStyle(color: Colors.grey, fontSize: 13, fontWeight: FontWeight.w600)),
+        Text(value, style: const TextStyle(color: Colors.black87, fontSize: 13, fontWeight: FontWeight.bold)),
+      ],
+    );
+  }
+}
+

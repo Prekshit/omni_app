@@ -11,9 +11,10 @@ export const categories = [
   },
   {
     id: 'bulk',
-    title: 'Bulk',
+    title: 'B2B',
     priority: 3,
   },
+
   {
     id: 'international',
     title: 'Global',
