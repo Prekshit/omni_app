@@ -611,16 +611,27 @@ UI sections:
       "(N items)" suffix is shown only when quantity > 1.
 
 UPI Lite disabling logic:
-  _isUpiLiteDisabled = _parsePrice(widget.product.price) > 2000
+  _isUpiLiteDisabled = (_parsePrice(widget.product.price) * quantity) > 2000
+  Threshold is based on the TOTAL order amount (unit price × quantity), NOT just
+  the unit price. So a ₹1,100 item at quantity 2 (₹2,200 total) will grey out UPI Lite.
   _parsePrice strips all non-digit/non-period characters, then tries double.parse.
   When disabled: Opacity(0.5) wrapper, grey background card, onChanged = null.
-  If UPI Lite was already selected and user adds another product that tips the
-  price above 2000, it is deselected automatically (isSelected checks !disabled).
+  The disabled check is re-evaluated on every setState (qty change), so the tile
+  re-enables or disables live as the user changes quantity.
 
 Quantity counter:
   State variable: int quantity = 1  (per-session, resets on new checkout)
   _qtyButton: 30×30 circle, plum when active, grey.shade200 when at limit.
   _totalPrice getter: unit × quantity formatted as ₹X (no decimals for whole numbers).
+
+Data passed to downstream screens on pay:
+  PaymentSuccessScreen receives: product, deliveryTime, paymentMethod, name,
+    address, contact, totalPrice (String), quantity (int)
+  InvoiceScreen receives: same set
+  Both screens use totalPrice everywhere price is displayed (Amount Paid, TOTAL PAID,
+  ORDER DETAILS price column). When quantity > 1, invoice also shows a grey
+  sub-line: "Qty: N × ₹unit" below the product source.
+  Share text also includes the "Qty: N × unit" line when qty > 1.
 
 Paying:
   Sets isProcessingPayment = true → shows 2.2s overlay.
