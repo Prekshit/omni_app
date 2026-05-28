@@ -2689,11 +2689,49 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
   // True when UPI Lite should be disabled (total = unit × qty > ₹2000).
   bool get _isUpiLiteDisabled => (_parsePrice(widget.product.price) * quantity) > 2000;
 
+  Map<String, dynamic>? _productDetails;
+  bool _isLoadingDetails = false;
+
   @override
   void initState() {
     super.initState();
     _calculateDeliveryTime();
     _fetchUserProfile();
+    _fetchProductDetails();
+  }
+
+  Future<void> _fetchProductDetails() async {
+    if (widget.product.shoppingLink.isEmpty) return;
+    setState(() => _isLoadingDetails = true);
+    try {
+      final backendUrl = omniSearchEndpoint.replaceAll('/visual-search', '/product-details');
+      final res = await http.post(
+        Uri.parse(backendUrl),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'url': widget.product.shoppingLink}),
+      ).timeout(const Duration(seconds: 15));
+      
+      if (res.statusCode == 200) {
+        if (mounted) setState(() => _productDetails = jsonDecode(res.body));
+      }
+    } catch (_) {
+      // Ignore errors for now; UI handles null details.
+    } finally {
+      if (mounted) setState(() => _isLoadingDetails = false);
+    }
+  }
+
+  void _showProductDetailsPopup() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => ProductDetailsSheet(
+        product: widget.product,
+        details: _productDetails,
+        isLoading: _isLoadingDetails,
+      ),
+    );
   }
 
   void _calculateDeliveryTime() {
@@ -2831,15 +2869,26 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
                       const SizedBox(height: 18),
 
                       _buildHeader('Product Details'),
-                      Card(
-                        color: Colors.white,
-                        elevation: 2,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Column(
-                            children: [
-                              Row(
+                      InkWell(
+                        onTap: _showProductDetailsPopup,
+                        borderRadius: BorderRadius.circular(12),
+                        child: Card(
+                          color: Colors.white,
+                          elevation: 2,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              children: [
+                                Row(
+                                  children: [
+                                    const Text('View full specifications', style: TextStyle(color: plum, fontWeight: FontWeight.bold, fontSize: 13)),
+                                    const Spacer(),
+                                    const Icon(Icons.chevron_right, color: plum, size: 20),
+                                  ],
+                                ),
+                                const Divider(height: 24, thickness: 1, color: Color(0xFFEEEEEE)),
+                                Row(
                                 children: [
                                   Container(
                                     width: 70,
@@ -2926,7 +2975,8 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
                           ),
                         ),
                       ),
-                      const SizedBox(height: 18),
+                    ),
+                    const SizedBox(height: 18),
 
                       Card(
                         color: plum.withOpacity(0.04),
@@ -3945,3 +3995,118 @@ class ShimmerPlaceholder extends StatelessWidget {
   }
 }
 
+class ProductDetailsSheet extends StatelessWidget {
+  const ProductDetailsSheet({
+    super.key,
+    required this.product,
+    this.details,
+    required this.isLoading,
+  });
+
+  final OmniProduct product;
+  final Map<String, dynamic>? details;
+  final bool isLoading;
+
+  static const Color plum = Color(0xFF360816);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: MediaQuery.of(context).size.height * 0.85,
+      padding: const EdgeInsets.all(20),
+      decoration: const BoxDecoration(
+        color: plum,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'Product Details',
+                style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: isLoading
+                ? const Center(child: CircularProgressIndicator(color: Colors.white))
+                : details == null
+                    ? const Center(child: Text('Failed to load deep details for this product.', style: TextStyle(color: Colors.white70)))
+                    : SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Images Carousel
+                            if (details!['images'] != null && details!['images'] is List)
+                              SizedBox(
+                                height: 200,
+                                child: ListView.builder(
+                                  scrollDirection: Axis.horizontal,
+                                  itemCount: (details!['images'] as List).length,
+                                  itemBuilder: (ctx, i) => Container(
+                                    margin: const EdgeInsets.only(right: 12),
+                                    decoration: BoxDecoration(borderRadius: BorderRadius.circular(12), color: Colors.white12),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: Image.network(
+                                      details!['images'][i],
+                                      height: 200,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, __, ___) => const SizedBox(),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            const SizedBox(height: 20),
+                            // Title
+                            Text(
+                              details!['productName'] ?? product.title,
+                              style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(height: 12),
+                            // Ratings
+                            if (details!['rating'] != null)
+                              Row(
+                                children: [
+                                  const Icon(Icons.star, color: Colors.amber, size: 18),
+                                  const SizedBox(width: 6),
+                                  Text(details!['rating'], style: const TextStyle(color: Colors.white70, fontSize: 15)),
+                                ],
+                              ),
+                            const SizedBox(height: 20),
+                            // Specs
+                            if (details!['specifications'] != null) ...[
+                              const Text('Specifications', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                              const SizedBox(height: 8),
+                              Text(details!['specifications'], style: const TextStyle(color: Colors.white70, fontSize: 14)),
+                              const SizedBox(height: 20),
+                            ],
+                            // Description
+                            if (details!['description'] != null) ...[
+                              const Text('Description', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                              const SizedBox(height: 8),
+                              Text(details!['description'], style: const TextStyle(color: Colors.white70, fontSize: 14)),
+                              const SizedBox(height: 20),
+                            ],
+                            // Seller
+                            if (details!['sellerInfo'] != null) ...[
+                              const Text('Seller Information', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                              const SizedBox(height: 8),
+                              Text(details!['sellerInfo'], style: const TextStyle(color: Colors.white70, fontSize: 14)),
+                            ],
+                          ],
+                        ),
+                      ),
+          ),
+        ],
+      ),
+    );
+  }
+}

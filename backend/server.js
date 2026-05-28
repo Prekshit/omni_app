@@ -5,10 +5,13 @@ import dotenv from 'dotenv';
 import express from 'express';
 import multer from 'multer';
 import { createClient } from '@supabase/supabase-js';
+import FirecrawlApp from '@mendable/firecrawl-js';
 import { categories, categoryById } from './config/categories.js';
 import { domainCategoryMap } from './config/domainMap.js';
 
 dotenv.config();
+
+const firecrawl = new FirecrawlApp({ apiKey: process.env.FIRECRAWL_API_KEY });
 
 const {
   PORT = 3000,
@@ -1192,6 +1195,45 @@ app.get('/api/user-profile', (_req, res) => {
     contact: '9999888822',
     creditCard: '**** **** **** *007'
   });
+});
+
+app.post('/api/product-details', express.json(), async (req, res) => {
+  const { url } = req.body;
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  log(`[Product Details] Scraping URL: ${url}`);
+  try {
+    const response = await firecrawl.scrapeUrl(url, {
+      formats: [{
+        type: 'json',
+        schema: {
+          type: 'object',
+          properties: {
+            productName: { type: 'string' },
+            images: { type: 'array', items: { type: 'string' } },
+            description: { type: 'string' },
+            specifications: { type: 'string' },
+            sellerInfo: { type: 'string' },
+            rating: { type: 'string' }
+          },
+          required: ['productName', 'images', 'description']
+        }
+      }]
+    });
+
+    if (response.success && response.json) {
+      log(`[Product Details] Successfully extracted data for ${url}`);
+      return res.json(response.json);
+    } else {
+      log(`[Product Details] Extraction failed or no data: ${JSON.stringify(response)}`);
+      return res.status(500).json({ error: 'Failed to extract data' });
+    }
+  } catch (error) {
+    log(`[Product Details] Error: ${error.message}`);
+    return res.status(500).json({ error: error.message });
+  }
 });
 
 app.listen(Number(PORT), '0.0.0.0', () => {
