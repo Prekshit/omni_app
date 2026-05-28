@@ -101,17 +101,17 @@ Future<void> main() async {
     cameras = [];
   }
 
-  runApp(const OmniApp());
+  runApp(const FetchApp());
 }
 
-class OmniApp extends StatelessWidget {
-  const OmniApp({super.key});
+class FetchApp extends StatelessWidget {
+  const FetchApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Omni',
+      title: 'Fetch',
       theme: ThemeData(
         fontFamily: 'Roboto',
       ),
@@ -540,7 +540,7 @@ class _ScannerScreenState
           const SizedBox(height: 10),
 
           const Text(
-            "Omni",
+            "Fetch",
             style: TextStyle(
               color: Colors.white,
               fontSize: 16,
@@ -3487,7 +3487,7 @@ class InvoiceScreen extends StatelessWidget {
       if (pngBytes == null) throw Exception('Failed to encode PNG');
 
       final orderId = _getOrderId();
-      final fileName = "Omni_Order_${orderId}.png";
+      final fileName = "Fetch_Order_${orderId}.png";
       
       final bool? success = await _nativeChannel.invokeMethod<bool>('saveImageToDownloads', {
         'bytes': pngBytes,
@@ -3521,7 +3521,7 @@ class InvoiceScreen extends StatelessWidget {
     final qtyLine = quantity > 1 ? 'Qty: $quantity × ${product.price}\n' : '';
     final text = """
 ========================================
-       OMNI RETAIL ORDER INVOICE
+       FETCH RETAIL ORDER INVOICE
 ========================================
 Order ID: #$orderId
 Date: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}
@@ -3552,7 +3552,7 @@ Thank you for choosing PhonePe Partner Checkout!
 
   String _getOrderId() {
     final int hash = (product.title + name).hashCode.abs();
-    return "OMN-${hash.toString().substring(0, 6)}";
+    return "FET-${hash.toString().substring(0, 6)}";
   }
 
   @override
@@ -3888,7 +3888,7 @@ class _OmniPhonePeRadarLoaderState extends State<OmniPhonePeRadarLoader>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      "Omni Visual Search",
+                      "Fetch AI Smart Search",
                       style: TextStyle(
                         color: Colors.white,
                         fontSize: 18,
@@ -3919,17 +3919,111 @@ class _OmniPhonePeRadarLoaderState extends State<OmniPhonePeRadarLoader>
           ),
           const Divider(color: Colors.white10, height: 24),
           
-          // Progressive Checklist
-          _buildChecklist(),
+          // Premium Cinematic AI Narrator Box (Centered Horizontally)
+          Center(
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.02),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: Colors.white.withOpacity(0.04),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: phonePePurple.withOpacity(0.05), // Subtle Fetch purple glow pulse
+                    blurRadius: 20,
+                    spreadRadius: 2,
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Subtle glowing AI active badge
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        width: 6,
+                        height: 6,
+                        decoration: const BoxDecoration(
+                          color: phonePeGold, // Cyan/Gold AI active indicator
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: phonePeGold,
+                              blurRadius: 6,
+                              spreadRadius: 1.5,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        "FETCH AI ENGINE ACTIVE",
+                        style: TextStyle(
+                          color: phonePeGold.withOpacity(0.8),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  
+                  // Animated Single Loading Message (Slide up + fade)
+                  SizedBox(
+                    height: 52, // Fixed height to prevent shifting
+                    child: Align(
+                      alignment: Alignment.center,
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 650),
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeInCubic,
+                        transitionBuilder: (Widget child, Animation<double> animation) {
+                          return FadeTransition(
+                            opacity: animation,
+                            child: SlideTransition(
+                              position: Tween<Offset>(
+                                begin: const Offset(0.0, 0.35),
+                                end: Offset.zero,
+                              ).animate(animation),
+                              child: child,
+                            ),
+                          );
+                        },
+                        child: Text(
+                          key: ValueKey<int>(_currentStep),
+                          _loadingSteps[_currentStep]['text'] as String,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.92),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500, // Medium font weight
+                            letterSpacing: 0.15,
+                            height: 1.35,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
           
           const SizedBox(height: 24),
           
-          // Shimmering Mock Product Rails
+          // Shimmering Mock Product Rails (Preserved below narrative text)
           _buildSkeletonLoader(),
           
-          const SizedBox(height: 16),
+          const SizedBox(height: 20),
           
-          // Cancel/Cancel button
+          // Cancel search button
           Align(
             alignment: Alignment.center,
             child: OutlinedButton(
@@ -3955,73 +4049,6 @@ class _OmniPhonePeRadarLoaderState extends State<OmniPhonePeRadarLoader>
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildChecklist() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: List.generate(_loadingSteps.length, (index) {
-        final step = _loadingSteps[index];
-        final stepText = step['text'] as String;
-        
-        final isCompleted = index < _currentStep;
-        final isActive = index == _currentStep;
-        
-        Color textColor;
-        Widget icon;
-        
-        if (isCompleted) {
-          textColor = Colors.white.withOpacity(0.5);
-          icon = const Icon(
-            Icons.check_circle,
-            color: Color(0xFFFFB300), // PhonePe Gold
-            size: 16,
-          );
-        } else if (isActive) {
-          textColor = Colors.white;
-          icon = const SizedBox(
-            width: 12,
-            height: 12,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF6A1BCE)),
-            ),
-          );
-        } else {
-          textColor = Colors.white.withOpacity(0.24);
-          icon = Icon(
-            Icons.circle_outlined,
-            color: Colors.white.withOpacity(0.16),
-            size: 14,
-          );
-        }
-
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4.0),
-          child: Row(
-            children: [
-              Container(
-                width: 24,
-                alignment: Alignment.center,
-                child: icon,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  stepText,
-                  style: TextStyle(
-                    color: textColor,
-                    fontSize: 13,
-                    fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      }),
     );
   }
 

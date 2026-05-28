@@ -11,7 +11,7 @@ import { domainCategoryMap } from './config/domainMap.js';
 
 dotenv.config();
 
-const firecrawl = new FirecrawlApp({ apiKey: process.env.FIRECRAWL_API_KEY });
+const firecrawl = new FirecrawlApp({ apiKey: process.env.FIRECRAWL_API_KEY || 'fc-dummy' });
 
 const {
   PORT = 3000,
