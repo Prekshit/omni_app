@@ -153,13 +153,15 @@ Future<void> main() async {
 
   WidgetsFlutterBinding.ensureInitialized();
 
-  try {
-    cameras = await availableCameras();
-  } catch (_) {
+  // Warm up available cameras asynchronously in parallel without blocking main runApp
+  availableCameras().then((val) {
+    cameras = val;
+  }).catchError((_) {
     cameras = [];
-  }
+  });
 
-  await loadFavorites();
+  // Load favorites asynchronously in parallel
+  loadFavorites();
 
   runApp(const FetchApp());
 }
@@ -233,6 +235,14 @@ class _ScannerScreenState
       Color(0xFF6A1BCE);
 
   Future<void> _initializeCamera() async {
+    if (cameras.isEmpty) {
+      try {
+        cameras = await availableCameras();
+      } catch (_) {
+        cameras = [];
+      }
+    }
+
     if (cameras.isEmpty) {
       if (mounted) {
         setState(() {
@@ -366,10 +376,28 @@ class _ScannerScreenState
 
     if (cameraController == null ||
         !cameraController.value.isInitialized) {
-      return const Scaffold(
+      return Scaffold(
         backgroundColor: Colors.black,
         body: Center(
-          child: CircularProgressIndicator(),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Image.asset(
+                'assets/logos/fetch_logo_horizontal.png',
+                width: 220,
+                fit: BoxFit.contain,
+              ),
+              const SizedBox(height: 28),
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  color: Color(0xFF360816), // Premium deep plum spinner
+                  strokeWidth: 2.5,
+                ),
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -5062,12 +5090,12 @@ class _ProductBrowserPageState extends State<ProductBrowserPage> {
           Expanded(
             child: Stack(
               children: [
-                // WebView component positioned with bottom: 84 to prevent overlapping web page elements
+                // WebView component filling the entire screen to allow overlapping
                 Positioned(
                   top: 0,
                   left: 0,
                   right: 0,
-                  bottom: 84, // Dedicated plum gutter area for the floating bar
+                  bottom: 0,
                   child: ClipRRect(
                     borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
                     child: Container(
@@ -5095,16 +5123,16 @@ class _ProductBrowserPageState extends State<ProductBrowserPage> {
                     ),
                   ),
 
-                // Floating glassmorphic pill footer bar (organic footer design) hovering in the bottom gutter
+                // Floating glassmorphic rounded rectangular overlapping styled bottom bar
                 Positioned(
-                  bottom: 16, // Beautifully hovering inside the 84px gutter
+                  bottom: 24, // Beautifully overlapping on top of WebView
                   left: 20,
                   right: 20,
                   child: Container(
                     height: 56,
                     decoration: BoxDecoration(
                       color: plum.withOpacity(0.88),
-                      borderRadius: BorderRadius.circular(28),
+                      borderRadius: BorderRadius.circular(16), // Rounded rectangular design
                       border: Border.all(color: Colors.white.withOpacity(0.18), width: 1.2),
                       boxShadow: [
                         BoxShadow(
@@ -5115,7 +5143,7 @@ class _ProductBrowserPageState extends State<ProductBrowserPage> {
                       ],
                     ),
                     child: ClipRRect(
-                      borderRadius: BorderRadius.circular(28),
+                      borderRadius: BorderRadius.circular(16),
                       child: BackdropFilter(
                         filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                         child: Row(

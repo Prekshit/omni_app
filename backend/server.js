@@ -907,6 +907,61 @@ function summarizeCategories(groupedCategories) {
   }));
 }
 
+function getDomainFromSource(source) {
+  if (!source) return null;
+  const src = source.toLowerCase().trim();
+  if (src === 'amazon' || src === 'amazon.in') return 'amazon.in';
+  if (src === 'ubuy' || src === 'ubuy.co.in') return 'ubuy.co.in';
+  if (src === 'zepto') return 'zepto.in';
+  if (src === 'blinkit') return 'blinkit.com';
+  if (src === 'bigbasket' || src === 'big basket') return 'bigbasket.com';
+  if (src === 'flipkart') return 'flipkart.com';
+  if (src === 'myntra') return 'myntra.com';
+  if (src === 'jiomart') return 'jiomart.com';
+  if (src === 'croma') return 'croma.com';
+  if (src === 'nykaa') return 'nykaa.com';
+  if (src === 'desertcart' || src === 'desertcart.in') return 'desertcart.in';
+  if (src === 'ebay') return 'ebay.com';
+  if (src === 'stockx') return 'stockx.com';
+  if (src.includes('.')) return src;
+  return `${src}.com`;
+}
+
+function getDirectStoreUrl(domain, title) {
+  const query = encodeURIComponent(title);
+  if (domain.includes('amazon.in')) {
+    return `https://www.amazon.in/s?k=${query}`;
+  }
+  if (domain.includes('amazon.com')) {
+    return `https://www.amazon.com/s?k=${query}`;
+  }
+  if (domain.includes('flipkart.com')) {
+    return `https://www.flipkart.com/search?q=${query}`;
+  }
+  if (domain.includes('ubuy.co.in') || domain.includes('ubuy.in')) {
+    return `https://www.ubuy.co.in/search/?q=${query}`;
+  }
+  if (domain.includes('ubuy.com')) {
+    return `https://www.ubuy.com/search/?q=${query}`;
+  }
+  if (domain.includes('zepto.in') || domain.includes('zeptonow.com')) {
+    return `https://zepto.in/search?query=${query}`;
+  }
+  if (domain.includes('blinkit.com')) {
+    return `https://blinkit.com/s/?q=${query}`;
+  }
+  if (domain.includes('bigbasket.com')) {
+    return `https://www.bigbasket.com/ps/?q=${query}`;
+  }
+  if (domain.includes('ebay.com')) {
+    return `https://www.ebay.com/sch/i.html?_nkw=${query}`;
+  }
+  if (domain.includes('myntra.com')) {
+    return `https://www.myntra.com/${query}`;
+  }
+  return `https://${domain}/search?q=${query}`;
+}
+
 function toOmniProduct(item, fallbackRank, sourceType = 'lens') {
   let shoppingLink = firstString(
     item.link,
@@ -936,7 +991,17 @@ function toOmniProduct(item, fallbackRank, sourceType = 'lens') {
     const cleanedSource = source.toLowerCase().trim().replace(/\s+/g, '');
     if (cleanedSource.includes('.') && !cleanedSource.includes(' ') && !cleanedSource.includes('/')) {
       domain = cleanedSource;
+    } else {
+      const resolvedDomain = getDomainFromSource(source);
+      if (resolvedDomain) {
+        domain = resolvedDomain;
+      }
     }
+  }
+
+  // Intercept Google comparison/search landing pages and rewrite them to direct store queries
+  if (shoppingLink && (shoppingLink.includes('google.') || shoppingLink.includes('/url') || shoppingLink.includes('/search')) && domain && !domain.includes('google.')) {
+    shoppingLink = getDirectStoreUrl(domain, title);
   }
 
   const categorization = categorizeProduct({
