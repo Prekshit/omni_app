@@ -1128,13 +1128,7 @@ class OmniProductsSheet extends StatelessWidget {
           future: searchFuture,
           builder: (context, snapshot) {
             if (snapshot.connectionState != ConnectionState.done) {
-              return const OmniSheetMessage(
-                icon: CircularProgressIndicator(
-                  color: Colors.white,
-                ),
-                title: "Finding similar products",
-                message: "Scanning this image across product results...",
-              );
+              return const OmniPhonePeRadarLoader();
             }
 
             if (snapshot.hasError) {
@@ -3162,6 +3156,240 @@ Thank you for choosing PhonePe Partner Checkout!
         Text(value, style: const TextStyle(color: Colors.black87, fontSize: 13, fontWeight: FontWeight.bold)),
       ],
     );
+  }
+}
+
+class OmniPhonePeRadarLoader extends StatefulWidget {
+  const OmniPhonePeRadarLoader({super.key});
+
+  @override
+  State<OmniPhonePeRadarLoader> createState() => _OmniPhonePeRadarLoaderState();
+}
+
+class _OmniPhonePeRadarLoaderState extends State<OmniPhonePeRadarLoader>
+    with TickerProviderStateMixin {
+  late AnimationController _radarController;
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
+  
+  int _currentStep = 0;
+  Timer? _timer;
+
+  static const List<String> _loadingSteps = [
+    '📤 Securely uploading image...',
+    '🧠 Analyzing visual properties...',
+    '⚡ Querying Omni search engines...',
+    '🛍️ Finding matches on Google Lens...',
+    '💰 Scanning Indian e-commerce & Quick Commerce...',
+    '🎯 Re-scoring matches for best relevance...',
+    '🏷️ Organizing category rails...'
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _radarController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2000),
+    )..repeat();
+
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1000),
+    )..repeat(reverse: true);
+
+    _pulseAnimation = Tween<double>(begin: 0.92, end: 1.08).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    _timer = Timer.periodic(const Duration(milliseconds: 2200), (timer) {
+      if (mounted) {
+        setState(() {
+          _currentStep = (_currentStep + 1) % _loadingSteps.length;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _radarController.dispose();
+    _pulseController.dispose();
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const Color phonePePurple = Color(0xFF6A1BCE);
+    const Color phonePeGold = Color(0xFFFFB300);
+
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // The expanding radar rings
+          SizedBox(
+            width: 180,
+            height: 180,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                // Animated radar rings paint
+                AnimatedBuilder(
+                  animation: _radarController,
+                  builder: (context, child) {
+                    return CustomPaint(
+                      painter: RadarPainter(
+                        _radarController.value,
+                        phonePePurple,
+                      ),
+                      size: const Size(180, 180),
+                    );
+                  },
+                ),
+                // Central pulsing logo icon
+                ScaleTransition(
+                  scale: _pulseAnimation,
+                  child: Container(
+                    width: 76,
+                    height: 76,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: const LinearGradient(
+                        colors: [phonePePurple, Color(0xFF8E24AA)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: phonePePurple.withOpacity(0.4),
+                          blurRadius: 16,
+                          spreadRadius: 2,
+                        ),
+                      ],
+                    ),
+                    child: const Center(
+                      child: Icon(
+                        Icons.auto_awesome,
+                        color: Colors.white,
+                        size: 36,
+                      ),
+                    ),
+                  ),
+                ),
+                // Gold outer glow ring
+                Container(
+                  width: 82,
+                  height: 82,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: phonePeGold.withOpacity(0.4),
+                      width: 1.5,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 32),
+          // Heading (Crisp PhonePe visual font style)
+          const Text(
+            "Searching the Web",
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 22,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.5,
+            ),
+          ),
+          const SizedBox(height: 12),
+          // Animated step text with smooth cross-fade
+          SizedBox(
+            height: 38,
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 350),
+              transitionBuilder: (Widget child, Animation<double> animation) {
+                return FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0.0, 0.25),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: child,
+                  ),
+                );
+              },
+              child: Text(
+                _loadingSteps[_currentStep],
+                key: ValueKey<int>(_currentStep),
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.85),
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 24),
+          // Clean, styled Close button matching PhonePe patterns
+          OutlinedButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+            },
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white70,
+              side: BorderSide(color: Colors.white.withOpacity(0.24)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+            ),
+            child: const Text(
+              "Cancel Search",
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class RadarPainter extends CustomPainter {
+  final double animationValue;
+  final Color color;
+
+  RadarPainter(this.animationValue, this.color);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final maxRadius = math.min(size.width, size.height) / 2;
+
+    for (int i = 0; i < 3; i++) {
+      final progress = (animationValue + i / 3.0) % 1.0;
+      final radius = maxRadius * progress;
+      final opacity = (1.0 - progress) * 0.45;
+
+      final paint = Paint()
+        ..color = color.withOpacity(opacity)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0;
+
+      canvas.drawCircle(center, radius, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(RadarPainter oldDelegate) {
+    return oldDelegate.animationValue != animationValue || oldDelegate.color != color;
   }
 }
 
