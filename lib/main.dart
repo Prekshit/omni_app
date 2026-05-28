@@ -8,6 +8,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/rendering.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 import 'dart:math' as math;
 
 
@@ -19,6 +21,50 @@ const String omniSearchEndpoint = String.fromEnvironment(
 );
 
 const MethodChannel _nativeChannel = MethodChannel('com.example.omni_app/native');
+
+// ── Global shared delivery address ──────────────────────────────────────────
+final ValueNotifier<Map<String, String>> globalUserAddress = ValueNotifier({
+  'name': 'Prekshit',
+  'address': '246, Green Glen Layout, Belandur, Bangalore',
+  'contact': '9999888822',
+  'creditCard': '**** **** **** *007',
+});
+
+// ── Favourites ──────────────────────────────────────────────────────────────
+final ValueNotifier<List<OmniProduct>> favoritesNotifier = ValueNotifier([]);
+
+Future<void> loadFavorites() async {
+  final prefs = await SharedPreferences.getInstance();
+  final raw = prefs.getStringList('favorites') ?? [];
+  favoritesNotifier.value = raw
+      .map((s) => OmniProduct.fromJson(jsonDecode(s) as Map<String, dynamic>))
+      .toList();
+}
+
+Future<void> _saveFavorites() async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setStringList(
+    'favorites',
+    favoritesNotifier.value.map((p) => jsonEncode(p.toJson())).toList(),
+  );
+}
+
+void toggleFavorite(OmniProduct product) {
+  final current = List<OmniProduct>.from(favoritesNotifier.value);
+  final idx = current.indexWhere((p) => p.shoppingLink == product.shoppingLink);
+  if (idx >= 0) {
+    current.removeAt(idx);
+  } else {
+    current.insert(0, product);
+  }
+  favoritesNotifier.value = current;
+  _saveFavorites();
+}
+
+bool isFavorite(OmniProduct product) {
+  return favoritesNotifier.value.any((p) => p.shoppingLink == product.shoppingLink);
+}
+
 
 final Map<String, ValueNotifier<Map<String, dynamic>?>> globalProductDetailsCache = {};
 final Map<String, ValueNotifier<bool>> globalProductLoadingCache = {};
@@ -100,6 +146,8 @@ Future<void> main() async {
   } catch (_) {
     cameras = [];
   }
+
+  await loadFavorites();
 
   runApp(const FetchApp());
 }
@@ -600,6 +648,17 @@ class OmniProduct {
       categoryTitle: categoryTitle,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'title': title,
+    'image': image,
+    'price': price,
+    'source': source,
+    'shoppingLink': shoppingLink,
+    'domain': domain,
+    'categoryId': categoryId,
+    'categoryTitle': categoryTitle,
+  };
 }
 
 class OmniCategory {
@@ -729,6 +788,75 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
             // Layer 5: crop action bar (crop mode only)
             if (_scannerMode == _ScannerMode.cropMode)
               _buildCropActionBar(),
+
+            // Layer 6: Permanent Header Bar (visible in all states - never vanishes)
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                child: Row(
+                  children: [
+                    GestureDetector(
+                      onTap: _handleBackButton,
+                      child: const Icon(Icons.arrow_back, color: Colors.white, size: 28),
+                    ),
+                    const SizedBox(width: 16),
+                    const Expanded(
+                      child: Text(
+                        'Scan & Shop',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 26,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    ValueListenableBuilder<List<OmniProduct>>(
+                      valueListenable: favoritesNotifier,
+                      builder: (context, favs, _) => GestureDetector(
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const FavoritesPage()),
+                        ),
+                        behavior: HitTestBehavior.opaque,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.9),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: const Color(0xFF360816).withOpacity(0.2), width: 1),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.15),
+                                blurRadius: 4,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                favs.isEmpty ? Icons.favorite_border : Icons.favorite,
+                                color: const Color(0xFF360816), // Plum color
+                                size: 24,
+                              ),
+                              const SizedBox(width: 5),
+                              Text(
+                                '${favs.length}',
+                                style: const TextStyle(
+                                  color: Color(0xFF360816), // Plum color
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -760,28 +888,7 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
   Widget _buildScannerUI() {
     return Column(
       children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-          child: Row(
-            children: [
-              GestureDetector(
-                onTap: () => Navigator.of(context).pop(),
-                child: const Icon(Icons.arrow_back, color: Colors.white, size: 28),
-              ),
-              const SizedBox(width: 16),
-              const Expanded(
-                child: Text(
-                  'Scan & Shop',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 26,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
+        const SizedBox(height: 60),
         const SizedBox(height: 70),
         Center(
           child: SizedBox(
@@ -1764,7 +1871,7 @@ class OmniProductsSheet extends StatelessWidget {
                         width: 22,
                         height: 22,
                         decoration: BoxDecoration(
-                          color: const Color(0xFF5F259F), // PhonePe Purple
+                          color: const Color(0xFF5F259F),
                           shape: BoxShape.circle,
                           border: Border.all(color: Colors.white, width: 1.5),
                           boxShadow: [
@@ -1789,6 +1896,37 @@ class OmniProductsSheet extends StatelessWidget {
                         ),
                       ),
                     ),
+                  // ❤ Heart button — bottom right
+                  Positioned(
+                    bottom: 3,
+                    right: 3,
+                    child: ValueListenableBuilder<List<OmniProduct>>(
+                      valueListenable: favoritesNotifier,
+                      builder: (context, favs, _) {
+                        final loved = favs.any((p) => p.shoppingLink == product.shoppingLink);
+                        return GestureDetector(
+                          onTap: () => toggleFavorite(product),
+                          child: Container(
+                            width: 22,
+                            height: 22,
+                            decoration: BoxDecoration(
+                              color: loved ? const Color(0xFF360816) : Colors.white,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: const Color(0xFF360816), width: 1.2),
+                              boxShadow: [
+                                BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 3),
+                              ],
+                            ),
+                            child: Icon(
+                              loved ? Icons.favorite : Icons.favorite_border,
+                              size: 12,
+                              color: loved ? Colors.white : const Color(0xFF360816),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 8),
@@ -2213,6 +2351,37 @@ class CategoryProductsPage extends StatelessWidget {
                         ),
                       ),
                     ),
+                  // ❤ Heart button — bottom right
+                  Positioned(
+                    bottom: 4,
+                    right: 4,
+                    child: ValueListenableBuilder<List<OmniProduct>>(
+                      valueListenable: favoritesNotifier,
+                      builder: (context, favs, _) {
+                        final loved = favs.any((p) => p.shoppingLink == product.shoppingLink);
+                        return GestureDetector(
+                          onTap: () => toggleFavorite(product),
+                          child: Container(
+                            width: 26,
+                            height: 26,
+                            decoration: BoxDecoration(
+                              color: loved ? const Color(0xFF360816) : Colors.white,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: const Color(0xFF360816), width: 1.2),
+                              boxShadow: [
+                                BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 4),
+                              ],
+                            ),
+                            child: Icon(
+                              loved ? Icons.favorite : Icons.favorite_border,
+                              size: 14,
+                              color: loved ? Colors.white : const Color(0xFF360816),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 10),
@@ -2713,10 +2882,10 @@ class PhonePeCheckoutScreen extends StatefulWidget {
 
 class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
   bool isLoading = true;
-  String name = 'Prekshit';
-  String address = '246, Green Glen Layout, Belandur, Bangalore';
-  String contact = '9999888822';
-  String creditCard = '**** **** **** *007';
+  String get name => globalUserAddress.value['name']!;
+  String get address => globalUserAddress.value['address']!;
+  String get contact => globalUserAddress.value['contact']!;
+  String get creditCard => globalUserAddress.value['creditCard']!;
   
   String selectedPayment = 'PhonePe Credit Card • 1007';
   bool isProcessingPayment = false;
@@ -2793,11 +2962,12 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      enableDrag: false,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => ProductDetailsSheet(
-        product: widget.product,
-        detailsNotifier: _productDetails,
-        isLoadingNotifier: _isLoadingDetails,
+      barrierColor: Colors.black.withOpacity(0.5),
+      builder: (context) => FractionallySizedBox(
+        heightFactor: 0.92,
+        child: ProductBrowserPage(product: widget.product),
       ),
     );
   }
@@ -2851,11 +3021,12 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
                   onPressed: () {
-                    setState(() {
-                      name = nameCtrl.text;
-                      address = addressCtrl.text;
-                      contact = contactCtrl.text;
-                    });
+                    globalUserAddress.value = {
+                      ...globalUserAddress.value,
+                      'name': nameCtrl.text,
+                      'address': addressCtrl.text,
+                      'contact': contactCtrl.text,
+                    };
                     Navigator.pop(ctx);
                   },
                   child: const Text('Save Address', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
@@ -2895,21 +3066,19 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
       final res = await http.get(Uri.parse(profileUrl)).timeout(const Duration(seconds: 4));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
-        setState(() {
-          name = data['name'] ?? name;
-          address = data['address'] ?? address;
-          contact = data['contact'] ?? contact;
-          creditCard = data['creditCard'] ?? creditCard;
-          isLoading = false;
-        });
+        globalUserAddress.value = {
+          'name': data['name']?.toString() ?? globalUserAddress.value['name']!,
+          'address': data['address']?.toString() ?? globalUserAddress.value['address']!,
+          'contact': data['contact']?.toString() ?? globalUserAddress.value['contact']!,
+          'creditCard': data['creditCard']?.toString() ?? globalUserAddress.value['creditCard']!,
+        };
+        setState(() => isLoading = false);
         return;
       }
     } catch (_) {
       // Fallback on error/offline
     }
-    setState(() {
-      isLoading = false;
-    });
+    setState(() => isLoading = false);
   }
 
   void _processPayment() {
@@ -2962,42 +3131,45 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       _buildHeader('Delivery Address', onEdit: _showEditAddressPopup),
-                      Card(
-                        color: Colors.white,
-                        elevation: 2,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  const Icon(Icons.person, color: plum, size: 20),
-                                  const SizedBox(width: 8),
-                                  Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Icon(Icons.location_on, color: plum, size: 20),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(address, style: const TextStyle(color: Colors.black87, height: 1.3)),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              Row(
-                                children: [
-                                  const Icon(Icons.phone, color: plum, size: 20),
-                                  const SizedBox(width: 8),
-                                  Text(contact, style: const TextStyle(color: Colors.black87)),
-                                ],
-                              ),
-                            ],
+                      ValueListenableBuilder<Map<String, String>>(
+                        valueListenable: globalUserAddress,
+                        builder: (context, addr, _) => Card(
+                          color: Colors.white,
+                          elevation: 2,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    const Icon(Icons.person, color: plum, size: 20),
+                                    const SizedBox(width: 8),
+                                    Text(addr['name']!, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Icon(Icons.location_on, color: plum, size: 20),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(addr['address']!, style: const TextStyle(color: Colors.black87, height: 1.3)),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                Row(
+                                  children: [
+                                    const Icon(Icons.phone, color: plum, size: 20),
+                                    const SizedBox(width: 8),
+                                    Text(addr['contact']!, style: const TextStyle(color: Colors.black87)),
+                                  ],
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -4288,6 +4460,457 @@ class ProductDetailsSheet extends StatelessWidget {
                   },
                 );
               },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FAVOURITES PAGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+class FavoritesPage extends StatelessWidget {
+  const FavoritesPage({super.key});
+
+  static const Color plum = Color(0xFF360816);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: plum,
+      appBar: AppBar(
+        backgroundColor: plum,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: const Text('Favourites', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 22)),
+        actions: [
+          ValueListenableBuilder<List<OmniProduct>>(
+            valueListenable: favoritesNotifier,
+            builder: (context, favs, _) => favs.isEmpty
+                ? const SizedBox()
+                : TextButton(
+                    onPressed: () {
+                      favoritesNotifier.value = [];
+                      _saveFavorites();
+                    },
+                    child: const Text('Clear all', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  ),
+          ),
+        ],
+      ),
+      body: ValueListenableBuilder<List<OmniProduct>>(
+        valueListenable: favoritesNotifier,
+        builder: (context, favs, _) {
+          if (favs.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.favorite_border, color: Colors.white.withOpacity(0.3), size: 72),
+                  const SizedBox(height: 16),
+                  Text('No favourites yet', style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 20, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Text('Tap the ❤ on any product card to save it here', style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 14), textAlign: TextAlign.center),
+                ],
+              ),
+            );
+          }
+          return GridView.builder(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+            itemCount: favs.length,
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 0.72,
+            ),
+            itemBuilder: (context, index) {
+              final product = favs[index];
+              final hasPhonePe = isProductPhonePeEnabled(product, favs);
+              return _FavoriteCard(product: product, hasPhonePe: hasPhonePe);
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _FavoriteCard extends StatelessWidget {
+  const _FavoriteCard({required this.product, required this.hasPhonePe});
+  final OmniProduct product;
+  final bool hasPhonePe;
+
+  static const Color plum = Color(0xFF360816);
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          if (hasPhonePe) {
+            Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => PhonePeCheckoutScreen(product: product),
+            ));
+          } else {
+            _nativeChannel.invokeMethod('launchUrl', {'url': product.shoppingLink});
+          }
+        },
+        borderRadius: BorderRadius.circular(18),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            boxShadow: [
+              BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 12, offset: const Offset(0, 6)),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Stack(
+                children: [
+                  OmniProductsSheet.productImage(double.infinity, 110, product),
+                  if (hasPhonePe)
+                    Positioned(
+                      top: 6, right: 6,
+                      child: Container(
+                        width: 24, height: 24,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF5F259F), shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 1.5),
+                        ),
+                        child: const Center(child: Text('पे', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w900, height: 1.0))),
+                      ),
+                    ),
+                  Positioned(
+                    bottom: 5, right: 5,
+                    child: GestureDetector(
+                      onTap: () => toggleFavorite(product),
+                      child: Container(
+                        width: 26, height: 26,
+                        decoration: BoxDecoration(
+                          color: plum, shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 1.2),
+                          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 4)],
+                        ),
+                        child: const Icon(Icons.favorite, size: 14, color: Colors.white),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(product.title, maxLines: 2, overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Color(0xFF231A1A), fontSize: 13, fontWeight: FontWeight.w800, height: 1.18)),
+              const SizedBox(height: 4),
+              Text(product.source.isEmpty ? product.domain : product.source,
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Color(0xFF6E6257), fontSize: 12, fontWeight: FontWeight.w600)),
+              const Spacer(),
+              if (product.price.isNotEmpty)
+                Text(product.price, style: const TextStyle(color: plum, fontSize: 13, fontWeight: FontWeight.w900)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PRODUCT BROWSER PAGE  (in-app styled WebView)
+// ══════════════════════════════════════════════════════════════════════════════
+
+class ProductBrowserPage extends StatefulWidget {
+  const ProductBrowserPage({super.key, required this.product});
+  final OmniProduct product;
+
+  @override
+  State<ProductBrowserPage> createState() => _ProductBrowserPageState();
+}
+
+class _ProductBrowserPageState extends State<ProductBrowserPage> {
+  late final WebViewController _controller;
+  double _loadingProgress = 0;
+  bool _isLoading = true;
+  bool _canGoBack = false;
+  bool _canGoForward = false;
+
+  static const Color plum = Color(0xFF360816);
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(NavigationDelegate(
+        onProgress: (progress) {
+          if (mounted) setState(() => _loadingProgress = progress / 100.0);
+        },
+        onPageStarted: (_) async {
+          if (mounted) setState(() => _isLoading = true);
+          _canGoBack = await _controller.canGoBack();
+          _canGoForward = await _controller.canGoForward();
+          if (mounted) setState(() {});
+        },
+        onPageFinished: (_) async {
+          _canGoBack = await _controller.canGoBack();
+          _canGoForward = await _controller.canGoForward();
+          if (mounted) setState(() => _isLoading = false);
+        },
+      ))
+      ..loadRequest(Uri.parse(widget.product.shoppingLink));
+  }
+
+  Widget _floatingFooterIcon({
+    required IconData icon,
+    required Color color,
+    required VoidCallback? onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          width: 40,
+          height: 40,
+          alignment: Alignment.center,
+          child: Icon(icon, color: color, size: 22),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildReformedHeader() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      decoration: const BoxDecoration(
+        color: plum,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Drag handle at top
+          Container(
+            width: 38,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.25),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(height: 12),
+          // Content Row
+          Row(
+            children: [
+              // Circular styled close button
+              GestureDetector(
+                onTap: () => Navigator.pop(context),
+                child: Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.12),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Center(
+                    child: Icon(Icons.close_rounded, color: Colors.white, size: 20),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              // Product details
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.product.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      widget.product.source.isEmpty ? widget.product.domain : widget.product.source,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(0.6),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              // Security status badge
+              if (_isLoading)
+                const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    color: Colors.white,
+                    strokeWidth: 2,
+                  ),
+                )
+              else
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.greenAccent.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.greenAccent.withOpacity(0.3), width: 1),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.security_rounded, color: Colors.greenAccent, size: 12),
+                      SizedBox(width: 4),
+                      Text(
+                        'Secure',
+                        style: TextStyle(
+                          color: Colors.greenAccent,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: plum,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      child: Column(
+        children: [
+          // Reformed Top Header
+          _buildReformedHeader(),
+          
+          // WebView Body
+          Expanded(
+            child: Stack(
+              children: [
+                // WebView component inside rounded ClipRRect
+                ClipRRect(
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+                  child: Container(
+                    color: Colors.white,
+                    child: WebViewWidget(controller: _controller),
+                  ),
+                ),
+                
+                // Thin progress line indicator
+                if (_isLoading)
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    child: AnimatedOpacity(
+                      opacity: _isLoading ? 1.0 : 0.0,
+                      duration: const Duration(milliseconds: 300),
+                      child: LinearProgressIndicator(
+                        value: _loadingProgress,
+                        backgroundColor: Colors.white12,
+                        valueColor: const AlwaysStoppedAnimation<Color>(plum),
+                        minHeight: 3,
+                      ),
+                    ),
+                  ),
+
+                // Floating glassmorphic pill footer bar (organic footer design)
+                Positioned(
+                  bottom: 24,
+                  left: 20,
+                  right: 20,
+                  child: Container(
+                    height: 56,
+                    decoration: BoxDecoration(
+                      color: plum.withOpacity(0.88),
+                      borderRadius: BorderRadius.circular(28),
+                      border: Border.all(color: Colors.white.withOpacity(0.18), width: 1.2),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.3),
+                          blurRadius: 16,
+                          offset: const Offset(0, 6),
+                        ),
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(28),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            _floatingFooterIcon(
+                              icon: Icons.arrow_back_ios_new_rounded,
+                              color: _canGoBack ? Colors.white : Colors.white30,
+                              onTap: _canGoBack ? () => _controller.goBack() : null,
+                            ),
+                            _floatingFooterIcon(
+                              icon: Icons.arrow_forward_ios_rounded,
+                              color: _canGoForward ? Colors.white : Colors.white30,
+                              onTap: _canGoForward ? () => _controller.goForward() : null,
+                            ),
+                            _floatingFooterIcon(
+                              icon: Icons.refresh_rounded,
+                              color: Colors.white,
+                              onTap: () => _controller.reload(),
+                            ),
+                            _floatingFooterIcon(
+                              icon: Icons.copy_all_rounded,
+                              color: Colors.white,
+                              onTap: () {
+                                Clipboard.setData(ClipboardData(text: widget.product.shoppingLink));
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Link copied to clipboard'),
+                                    behavior: SnackBarBehavior.floating,
+                                    duration: Duration(seconds: 2),
+                                  ),
+                                );
+                              },
+                            ),
+                            _floatingFooterIcon(
+                              icon: Icons.open_in_new_rounded,
+                              color: Colors.white,
+                              onTap: () => _nativeChannel.invokeMethod('launchUrl', {'url': widget.product.shoppingLink}),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
