@@ -1223,7 +1223,7 @@ app.post('/api/product-details', express.json(), async (req, res) => {
       }]
     });
 
-    if (response.success && response.json) {
+    if (response.json) {
       log(`[Product Details] Successfully extracted data for ${url}`);
       return res.json(response.json);
     } else {

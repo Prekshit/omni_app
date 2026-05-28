@@ -20,6 +20,58 @@ const String omniSearchEndpoint = String.fromEnvironment(
 
 const MethodChannel _nativeChannel = MethodChannel('com.example.omni_app/native');
 
+final Map<String, ValueNotifier<Map<String, dynamic>?>> globalProductDetailsCache = {};
+final Map<String, ValueNotifier<bool>> globalProductLoadingCache = {};
+final List<String> _prefetchQueue = [];
+bool _isPrefetching = false;
+
+void prefetchPhonePeProductDetails(OmniProduct product) {
+  if (product.shoppingLink.isEmpty) return;
+  if (globalProductLoadingCache.containsKey(product.shoppingLink)) return;
+
+  globalProductDetailsCache[product.shoppingLink] = ValueNotifier<Map<String, dynamic>?>(null);
+  globalProductLoadingCache[product.shoppingLink] = ValueNotifier<bool>(true);
+
+  _prefetchQueue.add(product.shoppingLink);
+  _processPrefetchQueue();
+}
+
+Future<void> _doFetch(String link) async {
+  final detailsNotifier = globalProductDetailsCache[link]!;
+  final loadingNotifier = globalProductLoadingCache[link]!;
+  try {
+    final backendUrl = omniSearchEndpoint.replaceAll('/visual-search', '/product-details');
+    final res = await http.post(
+      Uri.parse(backendUrl),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'url': link}),
+    ).timeout(const Duration(seconds: 45));
+
+    if (res.statusCode == 200) {
+      detailsNotifier.value = jsonDecode(res.body);
+    }
+  } catch (_) {
+  } finally {
+    loadingNotifier.value = false;
+  }
+}
+
+Future<void> _processPrefetchQueue() async {
+  if (_isPrefetching) return;
+  _isPrefetching = true;
+
+  while (_prefetchQueue.isNotEmpty) {
+    final link = _prefetchQueue.removeAt(0);
+    // Only fetch if it hasn't been completed or cancelled by direct fetch
+    if (globalProductLoadingCache[link]!.value == true) {
+      await _doFetch(link);
+      await Future.delayed(const Duration(seconds: 2)); // Rate limit breather
+    }
+  }
+
+  _isPrefetching = false;
+}
+
 bool isProductPhonePeEnabled(OmniProduct product, List<OmniProduct> categoryProducts) {
   if (product.categoryId == 'other') return false;
   final index = categoryProducts.indexOf(product);
@@ -1282,9 +1334,12 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
           
           final calculatedPrice = avgPrice * (1.0 - discountPct);
           final formattedPrice = "₹${calculatedPrice.toStringAsFixed(0)}";
-          updatedProducts.add(product.copyWith(price: formattedPrice));
+          final updatedProduct = product.copyWith(price: formattedPrice);
+          updatedProducts.add(updatedProduct);
+          prefetchPhonePeProductDetails(updatedProduct);
         } else {
           updatedProducts.add(product);
+          if (hasPhonePe) prefetchPhonePeProductDetails(product);
         }
       }
 
@@ -2689,35 +2744,48 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
   // True when UPI Lite should be disabled (total = unit × qty > ₹2000).
   bool get _isUpiLiteDisabled => (_parsePrice(widget.product.price) * quantity) > 2000;
 
-  Map<String, dynamic>? _productDetails;
-  bool _isLoadingDetails = false;
+  late ValueNotifier<Map<String, dynamic>?> _productDetails;
+  late ValueNotifier<bool> _isLoadingDetails;
 
   @override
   void initState() {
     super.initState();
+    final link = widget.product.shoppingLink;
+    _productDetails = globalProductDetailsCache[link] ?? ValueNotifier(null);
+    _isLoadingDetails = globalProductLoadingCache[link] ?? ValueNotifier(false);
+
     _calculateDeliveryTime();
     _fetchUserProfile();
-    _fetchProductDetails();
+    if (!globalProductLoadingCache.containsKey(link)) {
+      globalProductDetailsCache[link] = _productDetails;
+      globalProductLoadingCache[link] = _isLoadingDetails;
+      _fetchProductDetails();
+    } else if (_prefetchQueue.contains(link)) {
+      _prefetchQueue.remove(link);
+      _fetchProductDetails();
+    } else if (_isLoadingDetails.value == false && _productDetails.value == null) {
+      _fetchProductDetails();
+    }
   }
 
   Future<void> _fetchProductDetails() async {
     if (widget.product.shoppingLink.isEmpty) return;
-    setState(() => _isLoadingDetails = true);
+    _isLoadingDetails.value = true;
     try {
       final backendUrl = omniSearchEndpoint.replaceAll('/visual-search', '/product-details');
       final res = await http.post(
         Uri.parse(backendUrl),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'url': widget.product.shoppingLink}),
-      ).timeout(const Duration(seconds: 15));
+      ).timeout(const Duration(seconds: 45));
       
       if (res.statusCode == 200) {
-        if (mounted) setState(() => _productDetails = jsonDecode(res.body));
+        _productDetails.value = jsonDecode(res.body);
       }
     } catch (_) {
       // Ignore errors for now; UI handles null details.
     } finally {
-      if (mounted) setState(() => _isLoadingDetails = false);
+      _isLoadingDetails.value = false;
     }
   }
 
@@ -2728,8 +2796,75 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
       backgroundColor: Colors.transparent,
       builder: (ctx) => ProductDetailsSheet(
         product: widget.product,
-        details: _productDetails,
-        isLoading: _isLoadingDetails,
+        detailsNotifier: _productDetails,
+        isLoadingNotifier: _isLoadingDetails,
+      ),
+    );
+  }
+
+  void _showEditAddressPopup() {
+    final nameCtrl = TextEditingController(text: name);
+    final addressCtrl = TextEditingController(text: address);
+    final contactCtrl = TextEditingController(text: contact);
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Edit Delivery Address', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFF360816))),
+              const SizedBox(height: 20),
+              TextField(
+                controller: nameCtrl,
+                decoration: InputDecoration(labelText: 'Name', border: OutlineInputBorder(borderRadius: BorderRadius.circular(12))),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: addressCtrl,
+                decoration: InputDecoration(labelText: 'Address', border: OutlineInputBorder(borderRadius: BorderRadius.circular(12))),
+                maxLines: 2,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: contactCtrl,
+                decoration: InputDecoration(labelText: 'Contact Number', border: OutlineInputBorder(borderRadius: BorderRadius.circular(12))),
+                keyboardType: TextInputType.phone,
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF360816),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      name = nameCtrl.text;
+                      address = addressCtrl.text;
+                      contact = contactCtrl.text;
+                    });
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text('Save Address', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -2826,7 +2961,7 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _buildHeader('Delivery Address'),
+                      _buildHeader('Delivery Address', onEdit: _showEditAddressPopup),
                       Card(
                         color: Colors.white,
                         elevation: 2,
@@ -3054,12 +3189,25 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
     );
   }
 
-  Widget _buildHeader(String title) {
+  Widget _buildHeader(String title, {VoidCallback? onEdit}) {
     return Padding(
-      padding: const EdgeInsets.only(left: 4, bottom: 8),
-      child: Text(
-        title,
-        style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF6E6257)),
+      padding: const EdgeInsets.only(left: 4, bottom: 8, right: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF6E6257)),
+          ),
+          if (onEdit != null)
+            InkWell(
+              onTap: onEdit,
+              child: const Text(
+                'Edit',
+                style: TextStyle(color: Color(0xFF360816), fontWeight: FontWeight.bold, fontSize: 13),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -3999,13 +4147,13 @@ class ProductDetailsSheet extends StatelessWidget {
   const ProductDetailsSheet({
     super.key,
     required this.product,
-    this.details,
-    required this.isLoading,
+    required this.detailsNotifier,
+    required this.isLoadingNotifier,
   });
 
   final OmniProduct product;
-  final Map<String, dynamic>? details;
-  final bool isLoading;
+  final ValueNotifier<Map<String, dynamic>?> detailsNotifier;
+  final ValueNotifier<bool> isLoadingNotifier;
 
   static const Color plum = Color(0xFF360816);
 
@@ -4036,11 +4184,17 @@ class ProductDetailsSheet extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Expanded(
-            child: isLoading
-                ? const Center(child: CircularProgressIndicator(color: Colors.white))
-                : details == null
-                    ? const Center(child: Text('Failed to load deep details for this product.', style: TextStyle(color: Colors.white70)))
-                    : SingleChildScrollView(
+            child: ValueListenableBuilder<bool>(
+              valueListenable: isLoadingNotifier,
+              builder: (context, isLoading, child) {
+                return ValueListenableBuilder<Map<String, dynamic>?>(
+                  valueListenable: detailsNotifier,
+                  builder: (context, details, child) {
+                    return isLoading
+                        ? const Center(child: CircularProgressIndicator(color: Colors.white))
+                        : details == null
+                            ? const Center(child: Text('Failed to load deep details for this product.', style: TextStyle(color: Colors.white70)))
+                            : SingleChildScrollView(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -4103,7 +4257,11 @@ class ProductDetailsSheet extends StatelessWidget {
                             ],
                           ],
                         ),
-                      ),
+                      );
+                  },
+                );
+              },
+            ),
           ),
         ],
       ),
