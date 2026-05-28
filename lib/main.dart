@@ -4325,7 +4325,7 @@ class _OmniPhonePeRadarLoaderState extends State<OmniPhonePeRadarLoader>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      "Fetch AI Smart Search",
+                      "Fetch - Smart Search",
                       style: TextStyle(
                         color: Colors.white,
                         fontSize: 18,
