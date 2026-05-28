@@ -2247,8 +2247,8 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
     return '₹${total.toStringAsFixed(total == total.roundToDouble() ? 0 : 2)}';
   }
 
-  // True when UPI Lite should be disabled (price per unit > ₹2000).
-  bool get _isUpiLiteDisabled => _parsePrice(widget.product.price) > 2000;
+  // True when UPI Lite should be disabled (total = unit × qty > ₹2000).
+  bool get _isUpiLiteDisabled => (_parsePrice(widget.product.price) * quantity) > 2000;
 
   @override
   void initState() {
@@ -2317,6 +2317,8 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
             name: name,
             address: address,
             contact: contact,
+            totalPrice: _totalPrice,
+            quantity: quantity,
           ),
         ),
       );
@@ -2661,6 +2663,8 @@ class PaymentSuccessScreen extends StatelessWidget {
   final String name;
   final String address;
   final String contact;
+  final String totalPrice;
+  final int quantity;
 
   const PaymentSuccessScreen({
     super.key,
@@ -2670,6 +2674,8 @@ class PaymentSuccessScreen extends StatelessWidget {
     required this.name,
     required this.address,
     required this.contact,
+    required this.totalPrice,
+    required this.quantity,
   });
 
   @override
@@ -2738,7 +2744,7 @@ class PaymentSuccessScreen extends StatelessWidget {
                 ),
                 child: Column(
                   children: [
-                    _buildSummaryRow('Amount Paid', product.price.isEmpty ? '₹0' : product.price, isBold: true),
+                    _buildSummaryRow('Amount Paid', totalPrice, isBold: true),
                     const Divider(height: 24),
                     _buildSummaryRow('Transaction ID', 'TXN${DateTime.now().millisecondsSinceEpoch.toString().substring(3)}'),
                     const SizedBox(height: 10),
@@ -2763,6 +2769,8 @@ class PaymentSuccessScreen extends StatelessWidget {
                           name: name,
                           address: address,
                           contact: contact,
+                          totalPrice: totalPrice,
+                          quantity: quantity,
                         ),
                       ),
                     );
@@ -2813,6 +2821,8 @@ class InvoiceScreen extends StatelessWidget {
   final String name;
   final String address;
   final String contact;
+  final String totalPrice;
+  final int quantity;
 
   InvoiceScreen({
     super.key,
@@ -2822,6 +2832,8 @@ class InvoiceScreen extends StatelessWidget {
     required this.name,
     required this.address,
     required this.contact,
+    required this.totalPrice,
+    required this.quantity,
   });
 
   final GlobalKey _boundaryKey = GlobalKey();
@@ -2869,6 +2881,7 @@ class InvoiceScreen extends StatelessWidget {
 
   void _shareInvoiceText() {
     final orderId = _getOrderId();
+    final qtyLine = quantity > 1 ? 'Qty: $quantity × ${product.price}\n' : '';
     final text = """
 ========================================
        OMNI RETAIL ORDER INVOICE
@@ -2886,7 +2899,7 @@ PRODUCT SUMMARY
 ---------------
 Product: ${product.title}
 Source: ${product.source.isEmpty ? product.domain : product.source}
-Amount: ${product.price}
+${qtyLine}Amount: $totalPrice
 Est. Delivery: $deliveryTime
 
 PAYMENT INFORMATION
@@ -3038,6 +3051,13 @@ Thank you for choosing PhonePe Partner Checkout!
                                     'Source: ${product.source.isEmpty ? product.domain : product.source}',
                                     style: const TextStyle(fontSize: 12, color: Colors.grey),
                                   ),
+                                  if (quantity > 1) ...[  
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'Qty: $quantity × ${product.price}',
+                                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),
@@ -3045,7 +3065,7 @@ Thank you for choosing PhonePe Partner Checkout!
                             Expanded(
                               flex: 1,
                               child: Text(
-                                product.price,
+                                totalPrice,
                                 textAlign: TextAlign.right,
                                 style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: plum),
                               ),
@@ -3069,7 +3089,7 @@ Thank you for choosing PhonePe Partner Checkout!
                               style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: Colors.black),
                             ),
                             Text(
-                              product.price,
+                              totalPrice,
                               style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: plum),
                             ),
 
