@@ -609,10 +609,20 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
-        fit: StackFit.expand,
         children: [
 
-          CameraPreview(controller),
+          // Fills the full screen while preserving the camera's native aspect
+          // ratio — cropping edges instead of stretching (same as Google Lens).
+          SizedBox.expand(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: controller.value.previewSize?.height ?? 1,
+                height: controller.value.previewSize?.width ?? 1,
+                child: CameraPreview(controller),
+              ),
+            ),
+          ),
 
           SafeArea(
             child: Column(
@@ -2216,8 +2226,29 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
   
   String selectedPayment = 'PhonePe Credit Card • 1007';
   bool isProcessingPayment = false;
+  int quantity = 1;
 
   late String deliveryTime;
+
+  // Parses the raw price string (e.g. "₹1,299" or "$29.99") to a double.
+  double _parsePrice(String raw) {
+    final cleaned = raw.replaceAll(RegExp(r'[^\d.]'), '');
+    return double.tryParse(cleaned) ?? 0.0;
+  }
+
+  // Returns the per-unit price formatted as ₹X.
+  String get _unitPrice => widget.product.price;
+
+  // Returns the total price (unit × quantity) formatted as ₹X.
+  String get _totalPrice {
+    final unit = _parsePrice(widget.product.price);
+    if (unit == 0) return widget.product.price.isEmpty ? '₹0' : widget.product.price;
+    final total = unit * quantity;
+    return '₹${total.toStringAsFixed(total == total.roundToDouble() ? 0 : 2)}';
+  }
+
+  // True when UPI Lite should be disabled (price per unit > ₹2000).
+  bool get _isUpiLiteDisabled => _parsePrice(widget.product.price) > 2000;
 
   @override
   void initState() {
@@ -2365,58 +2396,90 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         child: Padding(
                           padding: const EdgeInsets.all(12),
-                          child: Row(
+                          child: Column(
                             children: [
-                              Container(
-                                width: 70,
-                                height: 70,
-                                clipBehavior: Clip.antiAlias,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFF7F0E2),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: widget.product.image.isEmpty
-                                    ? const Icon(Icons.shopping_bag, color: plum)
-                                    : Image.network(
-                                        widget.product.image,
-                                        fit: BoxFit.cover,
-                                        errorBuilder: (_, __, ___) => const Icon(Icons.shopping_bag, color: plum),
-                                      ),
-                              ),
-                              const SizedBox(width: 14),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      widget.product.title,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                              Row(
+                                children: [
+                                  Container(
+                                    width: 70,
+                                    height: 70,
+                                    clipBehavior: Clip.antiAlias,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFF7F0E2),
+                                      borderRadius: BorderRadius.circular(8),
                                     ),
-                                    const SizedBox(height: 6),
-                                    Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    child: widget.product.image.isEmpty
+                                        ? const Icon(Icons.shopping_bag, color: plum)
+                                        : Image.network(
+                                            widget.product.image,
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (_, __, ___) => const Icon(Icons.shopping_bag, color: plum),
+                                          ),
+                                  ),
+                                  const SizedBox(width: 14),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
                                         Text(
-                                          widget.product.price,
-                                          style: const TextStyle(color: plum, fontWeight: FontWeight.bold, fontSize: 15),
+                                          widget.product.title,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                                         ),
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                          decoration: BoxDecoration(
-                                            color: plum.withOpacity(0.08),
-                                            borderRadius: BorderRadius.circular(8),
-                                          ),
-                                          child: Text(
-                                            widget.product.categoryTitle,
-                                            style: const TextStyle(color: plum, fontSize: 11, fontWeight: FontWeight.bold),
-                                          ),
+                                        const SizedBox(height: 6),
+                                        Row(
+                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                          children: [
+                                            Text(
+                                              _unitPrice,
+                                              style: const TextStyle(color: plum, fontWeight: FontWeight.bold, fontSize: 15),
+                                            ),
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                              decoration: BoxDecoration(
+                                                color: plum.withOpacity(0.08),
+                                                borderRadius: BorderRadius.circular(8),
+                                              ),
+                                              child: Text(
+                                                widget.product.categoryTitle,
+                                                style: const TextStyle(color: plum, fontSize: 11, fontWeight: FontWeight.bold),
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ],
                                     ),
-                                  ],
-                                ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              // ── Quantity Counter ──
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  const Text('Quantity', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.black54)),
+                                  Row(
+                                    children: [
+                                      _qtyButton(
+                                        icon: Icons.remove,
+                                        onTap: quantity > 1 ? () => setState(() => quantity--) : null,
+                                      ),
+                                      Container(
+                                        width: 36,
+                                        alignment: Alignment.center,
+                                        child: Text(
+                                          '$quantity',
+                                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                        ),
+                                      ),
+                                      _qtyButton(
+                                        icon: Icons.add,
+                                        onTap: quantity < 99 ? () => setState(() => quantity++) : null,
+                                      ),
+                                    ],
+                                  ),
+                                ],
                               ),
                             ],
                           ),
@@ -2447,7 +2510,7 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
                         children: [
                           _buildPaymentRadio('PhonePe UPI', Icons.account_balance_wallet),
                           _buildPaymentRadio('PhonePe Wallet', Icons.wallet_giftcard),
-                          _buildPaymentRadio('UPI Lite', Icons.bolt),
+                          _buildPaymentRadio('UPI Lite', Icons.bolt, disabled: _isUpiLiteDisabled),
                           _buildPaymentRadio('PhonePe Credit Card • 1007', Icons.credit_card),
                         ],
                       ),
@@ -2463,7 +2526,7 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                           ),
                           child: Text(
-                            'Pay Total: ${widget.product.price.isEmpty ? "₹0" : widget.product.price}',
+                            'Pay Total: $_totalPrice${quantity > 1 ? " ($quantity items)" : ""}',
                             style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
                           ),
                         ),
@@ -2510,46 +2573,82 @@ class _PhonePeCheckoutScreenState extends State<PhonePeCheckoutScreen> {
     );
   }
 
-  Widget _buildPaymentRadio(String value, IconData icon) {
-    final isSelected = selectedPayment == value;
-    return Card(
-      color: Colors.white,
-      elevation: isSelected ? 2 : 0.5,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: BorderSide(
-          color: isSelected ? const Color(0xFF5F259F) : Colors.grey.shade200,
-          width: isSelected ? 1.5 : 1,
+  // Small circular +/- button for the quantity counter.
+  Widget _qtyButton({required IconData icon, VoidCallback? onTap}) {
+    final bool active = onTap != null;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 30,
+        height: 30,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: active ? const Color(0xFF360816) : Colors.grey.shade200,
         ),
+        child: Icon(icon, size: 16, color: active ? Colors.white : Colors.grey),
       ),
-      margin: const EdgeInsets.only(bottom: 10),
-      child: RadioListTile<String>(
-        value: value,
-        groupValue: selectedPayment,
-        activeColor: const Color(0xFF5F259F),
-        title: Row(
+    );
+  }
+
+  Widget _buildPaymentRadio(String value, IconData icon, {bool disabled = false}) {
+    final bool isSelected = selectedPayment == value && !disabled;
+    final Color labelColor = disabled
+        ? Colors.grey.shade400
+        : isSelected ? const Color(0xFF5F259F) : Colors.black87;
+    final Color iconColor = disabled
+        ? Colors.grey.shade300
+        : isSelected ? const Color(0xFF5F259F) : Colors.grey;
+
+    return Opacity(
+      opacity: disabled ? 0.5 : 1.0,
+      child: Card(
+        color: disabled ? Colors.grey.shade50 : Colors.white,
+        elevation: isSelected ? 2 : 0.5,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(
+            color: isSelected ? const Color(0xFF5F259F) : Colors.grey.shade200,
+            width: isSelected ? 1.5 : 1,
+          ),
+        ),
+        margin: const EdgeInsets.only(bottom: 10),
+        child: Stack(
           children: [
-            Icon(icon, color: isSelected ? const Color(0xFF5F259F) : Colors.grey, size: 20),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                value,
-                style: TextStyle(
-                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                  color: isSelected ? const Color(0xFF5F259F) : Colors.black87,
-                ),
+            RadioListTile<String>(
+              value: value,
+              groupValue: selectedPayment,
+              activeColor: const Color(0xFF5F259F),
+              title: Row(
+                children: [
+                  Icon(icon, color: iconColor, size: 20),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          value,
+                          style: TextStyle(
+                            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                            color: labelColor,
+                          ),
+                        ),
+                        if (disabled)
+                          const Text(
+                            'Not available above ₹2,000',
+                            style: TextStyle(fontSize: 11, color: Colors.grey),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
+              onChanged: disabled ? null : (String? val) {
+                if (val != null) setState(() => selectedPayment = val);
+              },
             ),
           ],
         ),
-
-        onChanged: (String? val) {
-          if (val != null) {
-            setState(() {
-              selectedPayment = val;
-            });
-          }
-        },
       ),
     );
   }

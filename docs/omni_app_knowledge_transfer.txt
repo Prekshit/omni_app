@@ -465,7 +465,7 @@ Per-response deduplication (parseLensProducts / parseShoppingProducts):
 12. FRONTEND ARCHITECTURE (FLUTTER)
 ================================================================================
 
-Single file: lib/main.dart (~3050 lines)
+Single file: lib/main.dart (~3150 lines)
 All widgets, screens, models, and logic are in this one file.
 
 App flow:
@@ -591,16 +591,36 @@ On load:
        Response: { name, address, contact, creditCard }
        Falls back to hardcoded values if unreachable.
 
+  3. Initialises quantity = 1.
+
 UI sections:
   - Delivery Address (name, address, phone from fetched profile)
-  - Product Details (image, title, price, category chip)
+  - Product Details card:
+      image, title, per-unit price, category chip
+      Quantity counter: dark-plum circular [-] / [+] buttons flanking the quantity
+      number. Range: 1–99. Minus button disabled (greyed) at qty = 1.
   - Estimated Delivery card
   - Payment options (RadioListTile list):
       PhonePe UPI
       PhonePe Wallet
-      UPI Lite
+      UPI Lite             ← DISABLED (greyed, unselectable) when unit price > ₹2,000.
+                             Shows sub-label: "Not available above ₹2,000".
       PhonePe Credit Card • 1007  ← default selected
-  - "Pay Total: ₹X" elevated button
+  - "Pay Total: ₹X (N items)" elevated button
+      Total = _parsePrice(product.price) × quantity
+      "(N items)" suffix is shown only when quantity > 1.
+
+UPI Lite disabling logic:
+  _isUpiLiteDisabled = _parsePrice(widget.product.price) > 2000
+  _parsePrice strips all non-digit/non-period characters, then tries double.parse.
+  When disabled: Opacity(0.5) wrapper, grey background card, onChanged = null.
+  If UPI Lite was already selected and user adds another product that tips the
+  price above 2000, it is deselected automatically (isSelected checks !disabled).
+
+Quantity counter:
+  State variable: int quantity = 1  (per-session, resets on new checkout)
+  _qtyButton: 30×30 circle, plum when active, grey.shade200 when at limit.
+  _totalPrice getter: unit × quantity formatted as ₹X (no decimals for whole numbers).
 
 Paying:
   Sets isProcessingPayment = true → shows 2.2s overlay.
@@ -822,7 +842,7 @@ KNOWN LIMITATIONS
      estimated price for PhonePe-branded Amazon cards.
 
   2. Single File Frontend:
-     All Flutter code (models, screens, widgets) is in one 3000-line main.dart.
+     All Flutter code (models, screens, widgets) is in one ~3150-line main.dart.
      Should be split into feature-organized files/packages for production.
 
   3. PhonePe Checkout is a Demo:
@@ -851,6 +871,10 @@ KNOWN LIMITATIONS
      Every scan triggers two fresh SerpApi calls. There is no result caching.
      High-frequency usage will rapidly exhaust the SerpApi quota.
 
+  9. Quantity is Session-Local:
+     The quantity counter in the checkout screen is in-memory only. It resets
+     to 1 every time the checkout screen is opened. There is no cart persistence.
+
 POTENTIAL FUTURE IMPROVEMENTS
 
   - Split main.dart into separate files (models/, screens/, widgets/, services/)
@@ -858,6 +882,7 @@ POTENTIAL FUTURE IMPROVEMENTS
   - Implement barcode/QR scanning (the button exists in UI but has no action yet)
   - Implement gallery image picker (the button exists in UI but has no action yet)
   - Replace PhonePe demo checkout with a real PhonePe SDK integration
+  - Persist cart/quantity across sessions (Supabase or local SQLite)
   - Add product detail page with price history graphs
   - Add user favorites / scan history (Supabase or local SQLite)
   - Replace domainMap.js with a database-backed admin UI for easier maintenance
