@@ -1,0 +1,870 @@
+================================================================================
+OMNI APP – COMPLETE KNOWLEDGE TRANSFER DOCUMENT
+================================================================================
+Version: May 2026
+Project Root: C:\Projects\omni_app
+Author context: This document is intended for complete knowledge transfer (KT)
+to a new developer or AI agent continuing work on the Omni project.
+================================================================================
+
+
+TABLE OF CONTENTS
+-----------------
+1.  What Is Omni?
+2.  Repository Structure
+3.  Technology Stack
+4.  Environment Variables & Configuration
+5.  Backend Architecture & Request Pipeline
+6.  External APIs Used
+7.  Product Query Inference (3-Stage Algorithm)
+8.  Product Scoring Math (Detailed)
+9.  Product Categorization Logic
+10. Domain Map
+11. Deduplication & Merging Logic
+12. Frontend Architecture (Flutter)
+13. Data Models (Dart)
+14. PhonePe Partner Checkout Feature
+15. Dynamic Pricing Algorithm (for Missing Prices)
+16. Android Native Integration (Kotlin MethodChannel)
+17. Running the Project Locally
+18. Debugging & Logs
+19. Known Limitations & Future Work
+
+
+================================================================================
+1. WHAT IS OMNI?
+================================================================================
+
+Omni is a mobile "scan and shop" application. The user points their phone camera
+at any real-world product, taps a capture button, and within seconds sees a
+categorized list of links to buy that product from multiple Indian and global
+e-commerce platforms.
+
+The app also features a mock "PhonePe Partner Checkout" experience. Selected
+product cards are branded with a PhonePe logo; tapping them bypasses a third-
+party browser and instead opens a polished in-app checkout page, a payment
+success screen, and a downloadable/shareable invoice.
+
+
+================================================================================
+2. REPOSITORY STRUCTURE
+================================================================================
+
+omni_app/
+├── backend/                   Node.js Express backend
+│   ├── server.js              Main server: all API logic, scoring, parsing
+│   ├── config/
+│   │   ├── categories.js      Category definitions (id, title, priority)
+│   │   └── domainMap.js       ~650 explicit domain -> category mappings
+│   ├── debug/                 Auto-generated debug JSON snapshots per request
+│   └── omni-backend.log       Append-only structured log file
+│
+├── lib/
+│   └── main.dart              Entire Flutter frontend (~3000 lines, single file)
+│
+├── android/
+│   ├── app/src/main/kotlin/com/example/omni_app/
+│   │   └── MainActivity.kt    Kotlin MethodChannel for native Android actions
+│   ├── gradle.properties      JVM & Gradle configuration
+│   └── build.gradle.kts       Android build configuration
+│
+├── test/
+│   └── widget_test.dart       Flutter widget test (smoke test only)
+│
+└── pubspec.yaml               Flutter dependencies
+
+
+================================================================================
+3. TECHNOLOGY STACK
+================================================================================
+
+BACKEND
+  Runtime:         Node.js (ES Modules, "type": "module" in package.json)
+  Framework:       Express.js
+  Image Upload:    Multer (memoryStorage, max 8 MB)
+  Image Storage:   Supabase Storage (temporary; auto-deleted after each request)
+  Search APIs:     SerpApi – Google Lens API + Google Shopping API
+  Logging:         Custom structured logger → console + omni-backend.log
+  Dependencies:    cors, dotenv, express, multer, @supabase/supabase-js
+
+FRONTEND
+  Language:        Dart
+  Framework:       Flutter (Android target, SM Galaxy A52s tested)
+  Camera:          camera package (camera_android_camerax plugin)
+  HTTP:            http package (dart:http)
+  Rendering:       RepaintBoundary for invoice PNG snapshot
+  Native Bridge:   MethodChannel 'com.example.omni_app/native'
+
+ANDROID NATIVE (Kotlin)
+  Class:           MainActivity extends FlutterActivity
+  Channel:         com.example.omni_app/native
+  Native actions:  launchUrl, shareInvoice, saveImageToDownloads
+
+
+================================================================================
+4. ENVIRONMENT VARIABLES & CONFIGURATION
+================================================================================
+
+Backend reads from a .env file in backend/:
+
+  SERPAPI_KEY                  Required. SerpApi API key.
+  SUPABASE_URL                 Required. Full Supabase project URL.
+  SUPABASE_SERVICE_ROLE_KEY    Required. Supabase service role key (bypasses RLS).
+  SUPABASE_BUCKET              Required. Storage bucket name (e.g. "omni-images").
+  PORT                         Optional. Default: 3000.
+  SERPAPI_SHOPPING_GL          Optional. Default: 'in'  (India geolocation).
+  SERPAPI_SHOPPING_HL          Optional. Default: 'en'  (English language).
+  SERPAPI_SHOPPING_GOOGLE_DOMAIN Optional. Default: 'google.co.in'.
+
+Flutter reads at compile time (not runtime) via --dart-define:
+
+  OMNI_BACKEND_URL             Full URL to the /api/visual-search endpoint.
+                               Default: http://10.0.2.2:3000/api/visual-search
+                               (10.0.2.2 is the emulator loopback to host)
+
+  Example run command:
+  flutter run --dart-define=OMNI_BACKEND_URL=http://192.168.1.X:3000/api/visual-search
+
+  IMPORTANT: The phone and the computer must be on the same Wi-Fi network.
+  IMPORTANT: There must be no space anywhere in the URL argument.
+
+
+================================================================================
+5. BACKEND ARCHITECTURE & REQUEST PIPELINE
+================================================================================
+
+Endpoint: POST /api/visual-search
+  Input:   multipart/form-data with field name 'image'
+  Output:  JSON with keys: products, categories, inferredQuery, querySource,
+           timingMs, categorySummary, sourceSummary
+
+Step-by-step pipeline for every scan request:
+
+  STEP 1 – Receive & validate image
+    Multer parses the multipart upload into req.file.buffer (in memory).
+    A unique requestId (8-char UUID slice) is generated for log tracing.
+
+  STEP 2 – Upload image to Supabase Storage
+    Path: visual-search/{timestamp}-{uuid}.{ext}
+    Timeout: 15 seconds
+    Purpose: Google Lens API requires a publicly accessible URL, not raw bytes.
+    Cleanup: The file is ALWAYS deleted from Supabase in the finally block,
+             regardless of success or failure, to prevent storage bloat.
+
+  STEP 3 – Generate a signed URL
+    Supabase signed URL valid for 10 minutes (600 seconds).
+    Timeout: 10 seconds.
+    This URL is what gets passed to SerpApi Lens.
+
+  STEP 4 – Call SerpApi Google Lens API
+    URL: https://serpapi.com/search.json?engine=google_lens&type=products
+    Timeout: 50 seconds (AbortController)
+    Returns: shopping_results, visual_matches, exact_matches
+    Parsed into a list of OmniProduct-shaped objects via parseLensProducts().
+
+  STEP 5 – Infer the product search query (see Section 7)
+    The top Lens results are analyzed to determine the best text query
+    for a follow-up Google Shopping search.
+
+  STEP 6 – Call SerpApi Google Shopping API (if inferredQuery is non-empty)
+    URL: https://serpapi.com/search.json?engine=google_shopping&q=...
+    Parameters: gl=in, hl=en, google_domain=google.co.in
+    Timeout: 50 seconds
+    Returns: shopping_results, featured_shopping_results, inline_shopping_results
+    NOTE: Shopping API failure is non-fatal. If it fails, Lens results are used alone.
+
+  STEP 7 – Merge products (deduplicate)
+    Both result sets (Lens + Shopping) are merged using a composite key:
+    normalizedTitle | domain | normalizedLink
+    First-seen wins; duplicates are dropped.
+
+  STEP 8 – Score all products (see Section 8)
+    Each product gets a numeric relevance score based on multiple signals.
+    Products are sorted descending by score, then by visualRank as tiebreaker.
+
+  STEP 9 – Categorize and group
+    Products are grouped into 6 ordered category buckets (see Section 9).
+    Each category gets at most 25 products.
+
+  STEP 10 – Debug snapshot
+    Full request result (including all raw data) is written to debug/{requestId}-omni-products.json
+    Raw SerpApi responses are also saved to debug/{requestId}-serpapi-lens-raw.json
+    and debug/{requestId}-serpapi-shopping-raw.json
+
+  STEP 11 – Return JSON response
+
+Other endpoints:
+  GET /health               Returns { ok: true }. Health check.
+  GET /api/user-profile     Returns static pre-seeded user info for checkout demo.
+
+
+================================================================================
+6. EXTERNAL APIS USED
+================================================================================
+
+SerpApi Google Lens API
+  Purpose: Identify the product in the image, return visual and shopping matches.
+  Key fields returned:
+    data.exact_matches[]        High-confidence exact product matches
+    data.shopping_results[]     Shopping listings identified via image
+    data.visual_matches[]       Visually similar items (may not be exact product)
+  URL: https://serpapi.com/search.json?engine=google_lens&type=products&url=...
+
+SerpApi Google Shopping API
+  Purpose: Get price-rich listings for a text query derived from Lens results.
+  Key fields returned:
+    data.shopping_results[]
+    data.featured_shopping_results[]
+    data.inline_shopping_results[]
+  URL: https://serpapi.com/search.json?engine=google_shopping&q=...
+
+Supabase Storage
+  Purpose: Temporary public image hosting (Lens API requires a URL, not bytes).
+  Bucket: configured via SUPABASE_BUCKET env var.
+  Note: Files are always cleaned up after each request in the finally block.
+
+
+================================================================================
+7. PRODUCT QUERY INFERENCE (3-STAGE ALGORITHM)
+================================================================================
+
+Function: inferProductQuery(products, lensRawData)
+Purpose: Derive the best possible text search query from Lens results to use
+         for the follow-up Shopping API call.
+
+The algorithm runs in 3 stages and returns as soon as a confident result is found:
+
+  STAGE 1 – Exact Matches (highest confidence)
+    Checks if lensRawData.exact_matches exists and has items.
+    Takes the first exact match's title, cleans it with cleanProductTitle(),
+    builds a query using buildQueryFromTitle(), and returns.
+    Source tag: 'exact_match'
+
+  STAGE 2 – Position-1 Anchor with brand confidence check
+    Takes the title of the first Lens result (position 1).
+    Cleans it with cleanProductTitle().
+    Looks for a known brand token in the cleaned title using knownBrands set.
+
+    HIGH CONFIDENCE: If position-2 also has the same brand token
+      → Use cleaned position-1 title as query.
+      Source tag: 'position1_high_confidence'
+
+    MEDIUM CONFIDENCE: Brand found but position-2 has a different brand or absent
+      → Use cleaned position-1 title as query.
+      Source tag: 'position1_medium_confidence'
+
+    NO BRAND but title is long enough (>5 chars after cleaning)
+      → Use cleaned position-1 title directly.
+      Source tag: 'position1_no_brand'
+
+  STAGE 3 – Consensus Fallback (lowest confidence)
+    Analyzes top 12 Lens products using position-weighted token scoring.
+    Weight for product at index i: max(1, 12 - i)
+    For each product, tokenizes title text and adds weight to each token's score.
+    Stop words (queryStopWords) are excluded.
+    Ranks tokens by total weighted score.
+    Identifies a brand token among top-ranked.
+    Returns: brand + top non-brand, non-accessory tokens (max 6 total).
+    Source tag: 'consensus'
+
+Title cleaning (cleanProductTitle):
+  1. Strip leading "Domain.tld: Buy " or "Domain.tld: " prefixes.
+  2. Strip trailing ": Domain.tld: ..." suffixes (marketplace name leakage).
+  3. Strip trailing " - Domain.tld" suffixes.
+  4. Strip trailing " | Category" suffixes.
+  Result: clean product model name without marketplace pollution.
+
+Query building (buildQueryFromTitle):
+  Tokenizes the cleaned title, removes queryStopWords, takes first 6 tokens,
+  joins with spaces.
+
+queryStopWords includes: accessory terms (adapter, bag, cable, case, charger,
+charging, cover, protector, skin, sleeve, stand) + marketplace names (amazon,
+aliexpress, bestbuy, ebay, flipkart, meesho, myntra, snapdeal, walmart) + 
+generic words (and, best, bluetooth, buy, compatible, electronics, for, free,
+genuine, global, india, new, official, online, original, price, pro, sale,
+shop, store, tws, true, wireless, with).
+
+
+================================================================================
+8. PRODUCT SCORING MATH (DETAILED)
+================================================================================
+
+Function: scoreProduct({ product, queryTokens, queryWithoutBrand, primaryBrand })
+Returns: { score: number, reasons: string[] }
+
+Base score:
+  score = max(0, 42 - product.visualRank)
+  → Products at rank 1 start at 41, rank 42+ start at 0.
+  → This rewards products the Lens API naturally placed higher.
+
+Query token bonus (+12 per token):
+  For each token in queryTokens:
+    If the token appears in the product's combined text (title + source + domain):
+      score += 12
+
+Full model match bonus (+18):
+  If queryWithoutBrand has ≥ 2 tokens AND all of them appear in the product text:
+    score += 18
+  → Rewards products that match all non-brand query terms (the model number/name).
+
+Brand match bonus (+18):
+  If primaryBrand is found AND it appears in the product text:
+    score += 18
+
+Different brand penalty (-35):
+  If primaryBrand is set AND the product text contains a DIFFERENT known brand:
+    score -= 35
+  → Strongly penalizes competitor brand results.
+
+Accessory penalty (-24):
+  If the product text contains an accessory term (case, charger, cable, etc.)
+  AND the original query did NOT ask for an accessory:
+    score -= 24
+  → Prevents phone cases appearing when scanning a phone.
+
+Category boost:
+  indian_ecommerce:  +14
+  quick_commerce:    +13
+  bulk:              +8
+  international:     +4
+  second_hand:       +3
+  other:             +0
+  → Biases results toward Indian local retailers (better UX for India).
+
+Data completeness bonuses:
+  Has image:  +3
+  Has price:  +3
+
+Final sort:
+  Primary:   descending relevanceScore
+  Tiebreak:  ascending visualRank (original Lens API position)
+
+
+================================================================================
+9. PRODUCT CATEGORIZATION LOGIC
+================================================================================
+
+Function: categorizeProduct({ domain, source, title })
+Returns: { categoryId, reason }
+
+Categories (in UI display order):
+  ID                 UI Title    Priority
+  ─────────────────────────────────────────
+  indian_ecommerce   Local       1
+  quick_commerce     Quick       2
+  bulk               B2B         3
+  international      Global      4
+  second_hand        Refurb      5
+  other              Other       6
+
+Categorization runs these checks in order (first match wins):
+
+  1. Direct domain map lookup
+     domainCategoryMap[domain] → immediate return if found
+     Covers ~650 explicitly curated domains.
+
+  2. Parent domain lookup
+     For domain "shop.amazon.in", tries "amazon.in" and "in" as parent domains.
+     Returns if any parent is in domainCategoryMap.
+
+  3. Heuristic: Second-hand detection
+     Matches specific second-hand domains + text signals:
+     ("used", "pre-owned", "refurbished", "renewed", "second hand", "resale")
+
+  4. Heuristic: B2B/Bulk detection
+     Matches specific B2B domains + text signals:
+     ("wholesale", "bulk", "supplier", "b2b", "manufacturer", "distributor")
+
+  5. Heuristic: Quick Commerce detection
+     Matches specific quick-delivery domains + text signals:
+     ("instamart", "zepto", "blinkit", "bigbasket", "dunzo", "jiomart",
+      "dmart", "quicksnick", "quick delivery", "minutes", "10 minute", "same day")
+
+  6. Heuristic: Global Marketplace detection
+     Matches global domain patterns (amazon., ebay., aliexpress., etc.) + signals:
+     ("global shipping", "international", "mercado libre", "ebay", "ozon")
+
+  7. Heuristic: India TLD
+     If domain ends with ".in" or ".co.in" → indian_ecommerce
+
+  8. Fallback
+     category: 'other', reason: 'fallback:other'
+
+SPECIAL CASE – Google Proxy Links:
+  SerpApi Shopping results sometimes return domain = "google.co.in" (a Google
+  comparison page, not the actual seller). The server detects this:
+  If domain.includes('google.') AND the item's source field looks like a domain
+  (contains '.', no spaces, no slashes) → use source as the true domain.
+  This prevents Indian retailers from being misclassified as Local due to
+  the India TLD heuristic on a Google domain.
+
+
+================================================================================
+10. DOMAIN MAP
+================================================================================
+
+File: backend/config/domainMap.js
+Size: ~650 entries, exported as domainCategoryMap object.
+
+Format: { 'domain.com': 'category_id', ... }
+
+Key mappings by category (representative examples):
+
+  indian_ecommerce (Local):
+    amazon.in, flipkart.com, myntra.com, ajio.com, meesho.com, nykaa.com (retail),
+    tatacliq.com, reliance digital, samsung.com, apple.com, nike.com, boat-lifestyle.com,
+    croma.com, vijaysales.com, pepperfry.com, urbanladder.com, mamaearth.in, etc.
+
+  quick_commerce (Quick):
+    blinkit.com, zepto.in, zeptonow.com, swiggy.com (Instamart), bigbasket.com,
+    jiomart.com, dunzo.com, dmart.in, dmartready.com, nykaa.com (as quick),
+    netmeds.com, pharmeasy.in, 1mg.com, kpnfresh.com, quicksnick.com, etc.
+
+  bulk (B2B):
+    indiamart.com, tradeindia.com, alibaba.com, moglix.com, moglix.in,
+    industrybuying.com, industrybuying.in, dhgate.com, flipkartwholesale.com,
+    ajiobusiness.com, globalsources.com, exportersindia.com, etc.
+
+  international (Global):
+    amazon.com, ebay.com, aliexpress.com, walmart.com, bestbuy.com, etsy.com,
+    ubuy.com, ubuy.co.in, ubuy.in, desertcart.in (but Indian-facing), etc.
+    Also: amazon.co.uk, amazon.it, amazon.com.be, ozon.ru, mercadolibre variants.
+
+  second_hand (Refurb):
+    cashify.in, olx.in, quikr.com, backmarket.com, 2gud.com, budli.in,
+    electronicsbazaar.com, togofogo.com, yaantra.com, refitglobal.com, etc.
+
+Maintenance note: When new domains appear in debug JSON logs that are categorized
+as "other" but should be in a specific category, add them manually to domainMap.js.
+
+
+================================================================================
+11. DEDUPLICATION & MERGING LOGIC
+================================================================================
+
+Product deduplication uses a composite key:
+  key = normalizedTitle + "|" + domain + "|" + normalizedLink
+
+  normalizedTitle: lowercase, non-alphanumeric replaced with spaces, trimmed.
+  normalizedLink:  URL parsed to remove query params and hash, lowercased.
+
+Within a single SerpApi response (parseSearchProducts):
+  Key = title + "|" + shoppingLink (simpler, pre-normalization)
+
+Merge order (mergeProducts):
+  Lens products are added first.
+  Shopping products are added after.
+  First occurrence of any key wins → Lens takes priority for ordering.
+
+Per-response deduplication (parseLensProducts / parseShoppingProducts):
+  Products with no title or no shoppingLink are dropped entirely.
+
+
+================================================================================
+12. FRONTEND ARCHITECTURE (FLUTTER)
+================================================================================
+
+Single file: lib/main.dart (~3050 lines)
+All widgets, screens, models, and logic are in this one file.
+
+App flow:
+  main() → OmniApp (MaterialApp) → OmniHomePage (home screen)
+    → "Scan & Shop" button → OmniScannerScreen (camera view)
+      → Tap camera button → searchWithCamera()
+        → captureAndSearchProducts() [async, returns Future<List<OmniCategory>>]
+          → showModalBottomSheet → OmniProductsSheet
+            (shows results as horizontal rail cards per category)
+              → Tap PhonePe card → PhonePeCheckoutScreen
+                → Pay Now → PaymentSuccessScreen
+                  → View Invoice → InvoiceScreen
+                    → Download (PNG) / Share (native intent)
+              → Tap normal card → native browser chooser (Android Intent)
+              → "View all" button → OmniCategoryPage (grid layout)
+
+Key state: OmniScannerScreen (_OmniScannerScreenState)
+  isCapturing: bool – prevents double-tapping during capture
+  CameraController – manages camera lifecycle
+
+Key constants:
+  omniSearchEndpoint: compile-time string from --dart-define OMNI_BACKEND_URL
+  _nativeChannel: MethodChannel('com.example.omni_app/native')
+
+Key function: captureAndSearchProducts()
+  1. Takes photo via camera controller
+  2. Sends multipart POST to omniSearchEndpoint (60s timeout)
+  3. Parses JSON response into List<OmniCategory>
+  4. Runs _fillMissingPhonePePrices() to assign prices to unpriced PhonePe cards
+  5. Returns the final list for the FutureBuilder in OmniProductsSheet
+
+
+================================================================================
+13. DATA MODELS (DART)
+================================================================================
+
+OmniProduct (immutable value class)
+  Fields:
+    title:         String  – product name
+    image:         String  – thumbnail URL
+    price:         String  – raw price string (e.g. "₹1,299" or "$29.99" or "")
+    source:        String  – seller/platform name
+    shoppingLink:  String  – URL to the product page
+    domain:        String  – extracted seller domain
+    categoryId:    String  – one of the 6 category IDs
+    categoryTitle: String  – display name of the category
+  Methods:
+    OmniProduct.fromJson(Map) – factory constructor from API response
+    copyWith({String? price}) – returns new instance with overridden price
+
+OmniCategory
+  Fields:
+    id:       String              – category ID
+    title:    String              – display name
+    products: List<OmniProduct>   – up to 25 products in this category
+  Methods:
+    OmniCategory.fromJson(Map) – factory constructor from API response
+
+OmniSearchException
+  Extends Exception.
+  Wraps user-facing error messages from the backend or timeout.
+
+
+================================================================================
+14. PHONEPE PARTNER CHECKOUT FEATURE
+================================================================================
+
+This is a DEMO/MOCK feature for presentation purposes. It simulates what a
+"PhonePe Partner Checkout" integration would look like.
+
+--- WHICH PRODUCTS GET THE PHONEPE BADGE ---
+
+Function: isProductPhonePeEnabled(OmniProduct product, List<OmniProduct> categoryProducts)
+
+Logic:
+  - Products in category 'other' are NEVER branded. (return false)
+  - The branded count is determined DETERMINISTICALLY using the category ID's hash:
+      seed = product.categoryId.hashCode
+  - For 'indian_ecommerce' (Local tab):
+      Only indices 0–4 are eligible (max 5 cards examined).
+      count = 2 + (seed.abs() % 4)  → always between 2 and 5
+      Product is branded if: index < count
+  - For all other categories:
+      Only indices 0–2 are eligible (max 3 cards examined).
+      count = 1 + (seed.abs() % 3)  → always between 1 and 3
+      Product is branded if: index < count
+
+  KEY DESIGN DECISION: The seed is based on categoryId (not product data), so
+  the count is FIXED per category across the entire session. This ensures the
+  SAME products are branded in both the horizontal rail (bottom sheet) and the
+  grid view (full category page). The UI is always consistent.
+
+--- VISUAL BADGE ---
+
+A circular purple container (Color 0xFF5F259F, PhonePe brand purple) is overlaid
+on the top-right corner of the product's image using a Stack widget.
+Inside it, the Devanagari text 'पे' is shown in white, simulating the PhonePe logo.
+Badge diameter: 22px
+
+--- CARD BEHAVIOR ---
+
+PhonePe-branded card tapped:
+  → Navigator.push → PhonePeCheckoutScreen(product: product)
+
+Normal (unbranded) card tapped:
+  → _nativeChannel.invokeMethod('launchUrl', {'url': product.shoppingLink})
+  → Android: Intent.createChooser(ACTION_VIEW) → native browser chooser dialog
+
+--- CHECKOUT SCREEN (PhonePeCheckoutScreen) ---
+
+Theme: White background, deep plum (#360816) app bar.
+
+On load:
+  1. Calculates delivery time based on categoryId (deterministic using title hash):
+       quick_commerce:   15 + (hash % 45) minutes
+       indian_ecommerce / second_hand: 2 + (hash % 6) days
+       bulk:             7 + (hash % 9) days
+       international:    15 + (hash % 16) days
+       other:            4 days (default)
+
+  2. Fetches user profile from backend:
+       GET /api/user-profile (4s timeout)
+       Response: { name, address, contact, creditCard }
+       Falls back to hardcoded values if unreachable.
+
+UI sections:
+  - Delivery Address (name, address, phone from fetched profile)
+  - Product Details (image, title, price, category chip)
+  - Estimated Delivery card
+  - Payment options (RadioListTile list):
+      PhonePe UPI
+      PhonePe Wallet
+      UPI Lite
+      PhonePe Credit Card • 1007  ← default selected
+  - "Pay Total: ₹X" elevated button
+
+Paying:
+  Sets isProcessingPayment = true → shows 2.2s overlay.
+  After delay → Navigator.pushReplacement → PaymentSuccessScreen
+
+--- PAYMENT SUCCESS SCREEN ---
+
+Shows:
+  - Large circular badge in PhonePe Purple (#5F259F) with a white checkmark
+  - "Payment Successful" title in PhonePe Purple
+  - Summary card: Amount Paid, Transaction ID (TXN + epoch timestamp suffix),
+    Payment Via (method name only, before "•"), Delivery Estimate
+  - "View Invoice" button → InvoiceScreen
+
+--- INVOICE SCREEN ---
+
+Shows a formal receipt docket with RepaintBoundary (GlobalKey) wrapping the
+receipt widget for PNG capture.
+
+Receipt contents:
+  - PhonePe branding header (purple gradient bar)
+  - Order ID: #OMN-{6-digit hash of title+name}
+  - Date: day/month/year
+  - DELIVERY DETAILS section: name, address, contact
+  - ORDER DETAILS section: product title (2 lines max), source/domain, price
+  - PAYMENT INFORMATION section: Payment Method, Delivery Time
+  - TOTAL PAID (large text)
+  - "Thank you for your purchase!" footer
+
+Actions:
+  Download button → _downloadInvoicePng(context)
+    Uses RepaintBoundary.toImage(pixelRatio: 3.0) → PNG bytes
+    Calls _nativeChannel.invokeMethod('saveImageToDownloads', {bytes, fileName})
+    Shows SnackBar on success.
+
+  Share Invoice button → _shareInvoiceText()
+    Builds a structured ASCII invoice text block.
+    Calls _nativeChannel.invokeMethod('shareInvoice', {text})
+
+
+================================================================================
+15. DYNAMIC PRICING ALGORITHM (FOR MISSING PRICES)
+================================================================================
+
+Problem: Amazon.in listings (and some others) do not expose prices in SerpApi
+Lens results. PhonePe-branded cards with no price look broken at checkout.
+
+Solution: A post-processing step that fills in estimated prices for unpriced
+PhonePe-branded products, using other products in the same category as reference.
+
+Function: _fillMissingPhonePePrices(List<OmniCategory> categories)
+Called in: captureAndSearchProducts(), after parsing and before returning results.
+
+Algorithm (runs once per category/tab):
+
+  STEP 1 – Identify PhonePe products with missing prices:
+    For each product: isProductPhonePeEnabled() && !_hasPriceFetched()
+    _hasPriceFetched() returns true if price is non-empty and parseable as double.
+
+  STEP 2 – Collect all successfully fetched prices in the tab:
+    fetchedPrices = all products where _hasPriceFetched() is true, parsed as double.
+
+  STEP 3 – Compute average:
+    If fetchedPrices is non-empty:
+      avgPrice = sum(fetchedPrices) / count(fetchedPrices)
+    Else (no prices at all in the tab):
+      avgPrice = 1000.0 + Random().nextInt(9001)  → random between 1000 and 10000
+
+  STEP 4 – Assign prices with discount:
+    If exactly 1 PhonePe product is missing a price:
+      discountPct = 0.12  (fixed 12% discount)
+    If 2 or more PhonePe products are missing prices:
+      discountPct = Random().nextDouble() * 0.15  (random 0% to 15% each)
+
+    calculatedPrice = avgPrice * (1.0 - discountPct)
+    formattedPrice  = "₹" + calculatedPrice.toStringAsFixed(0)
+    Product gets: product.copyWith(price: formattedPrice)
+
+  Products that already have prices are NOT modified.
+  Categories with no unpriced PhonePe products are returned unchanged.
+
+Math summary:
+  Single card: price = avg - (avg × 0.12) = avg × 0.88
+  Multiple cards: price = avg - (avg × rand[0, 0.15]) = avg × rand[0.85, 1.00]
+  No prices in tab: avg = rand[1000, 10000], then apply above formula.
+
+Price parser (_parsePriceToDouble):
+  Strips all non-digit, non-period characters from the price string.
+  Tries to parse the resulting string as a double.
+  Returns null on failure.
+
+
+================================================================================
+16. ANDROID NATIVE INTEGRATION (KOTLIN METHODCHANNEL)
+================================================================================
+
+File: android/app/src/main/kotlin/com/example/omni_app/MainActivity.kt
+Channel: com.example.omni_app/native
+
+Three methods are registered:
+
+  1. launchUrl
+     Arguments: { url: String }
+     Action: Creates ACTION_VIEW Intent with the URL, wraps in Intent.createChooser
+             ("Open with browser"), starts the chooser activity.
+     Used: When a non-PhonePe product card is tapped.
+
+  2. shareInvoice
+     Arguments: { text: String }
+     Action: Creates ACTION_SEND Intent (type: text/plain), sets EXTRA_SUBJECT
+             ("Omni Order Invoice") and EXTRA_TEXT, wraps in chooser
+             ("Share Invoice via"), starts activity.
+     Used: "Share Invoice" button on InvoiceScreen.
+
+  3. saveImageToDownloads
+     Arguments: { bytes: ByteArray, fileName: String }
+     Action (Android 10+ / API 29+):
+       Uses MediaStore.Downloads API:
+       - Creates ContentValues with DISPLAY_NAME, MIME_TYPE (image/png),
+         RELATIVE_PATH (Downloads), IS_PENDING = 1
+       - Inserts into MediaStore.Downloads.EXTERNAL_CONTENT_URI
+       - Opens output stream and writes bytes
+       - Sets IS_PENDING = 0 to finalize
+       No storage permission required on Android 10+.
+     Action (Android < 10):
+       Writes to Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)
+       directly via File.writeBytes().
+     Used: "Download" button on InvoiceScreen.
+
+Dart side:
+  const MethodChannel _nativeChannel = MethodChannel('com.example.omni_app/native');
+  Invocation pattern: _nativeChannel.invokeMethod('methodName', {args})
+
+
+================================================================================
+17. RUNNING THE PROJECT LOCALLY
+================================================================================
+
+PREREQUISITES
+  - Node.js 18+ installed
+  - Flutter SDK installed (3.x or later)
+  - Android SDK installed (via Android Studio)
+  - USB-connected Android phone with developer mode + USB debugging enabled
+    OR Android Emulator
+  - A valid SerpApi API key
+  - A valid Supabase project with a storage bucket
+
+START THE BACKEND
+  cd C:\Projects\omni_app\backend
+  # Create .env file with required variables (see Section 4)
+  npm install
+  npm run dev
+  # Server starts on http://0.0.0.0:3000
+  # Health check: http://localhost:3000/health
+
+FIND YOUR LOCAL IP (for physical device)
+  # Windows:
+  ipconfig | findstr "IPv4"
+  # Use the IP shown under your Wi-Fi adapter (e.g. 192.168.1.X or 10.X.X.X)
+  # Both phone and computer must be on the same Wi-Fi network.
+
+START THE FLUTTER APP
+  cd C:\Projects\omni_app
+  flutter run --dart-define=OMNI_BACKEND_URL=http://<YOUR_IP>:3000/api/visual-search
+
+  # For emulator (default, no need to specify):
+  flutter run
+
+GRADLE BUILD ISSUES (Windows)
+  If Gradle fails with "Address already in use: bind":
+  1. taskkill /F /IM java.exe  (kill stale Java processes)
+  2. The fix is in android/gradle.properties:
+     org.gradle.jvmargs=... -Djava.net.preferIPv4Stack=true
+     (already applied; forces IPv4 to avoid VPN/WSL socket conflicts)
+  3. flutter clean && flutter run
+
+
+================================================================================
+18. DEBUGGING & LOGS
+================================================================================
+
+Backend structured log (stdout + file):
+  File: backend/omni-backend.log (append-only)
+  Format: [ISO timestamp] [requestId] message
+  Logged events: image received, Supabase upload/URL, SerpApi calls, timing,
+                 product counts, errors, cleanup.
+
+Backend debug JSON snapshots (per request):
+  Directory: backend/debug/
+  Files:
+    {requestId}-serpapi-lens-raw.json      Raw SerpApi Lens API response
+    {requestId}-serpapi-shopping-raw.json  Raw SerpApi Shopping API response
+    {requestId}-omni-products.json         Merged, scored, categorized results
+                                           including categorySummary, timingMs
+
+Using timingMs for performance analysis:
+  supabaseUpload, signedUrl, serpApi, shoppingApi, inferQuery, 
+  normalizeAndGroup, total
+  All values are in milliseconds.
+  Typically: Supabase upload ~1–3s, Lens ~8–20s, Shopping ~3–10s.
+  Timeout thresholds: Supabase 15s/10s, SerpApi 50s each.
+
+Flutter debugging:
+  Run with: flutter run
+  Hot reload: Press 'r' in terminal (reloads UI without full restart)
+  Hot restart: Press 'R' in terminal (full app restart)
+  Error messages are shown in the OmniProductsSheet bottom sheet UI directly.
+
+
+================================================================================
+19. KNOWN LIMITATIONS & FUTURE WORK
+================================================================================
+
+KNOWN LIMITATIONS
+
+  1. Amazon.in Pricing:
+     SerpApi Lens does not return prices for most Amazon.in listings.
+     Current workaround: Dynamic pricing algorithm (Section 15) generates an
+     estimated price for PhonePe-branded Amazon cards.
+
+  2. Single File Frontend:
+     All Flutter code (models, screens, widgets) is in one 3000-line main.dart.
+     Should be split into feature-organized files/packages for production.
+
+  3. PhonePe Checkout is a Demo:
+     The checkout flow does NOT actually process payments. It is a UI simulation.
+     User profile data is hardcoded in the backend. Payment processing is fake.
+
+  4. No User Authentication:
+     There is no login, session management, or user-specific data persistence.
+
+  5. Lens Accuracy:
+     Google Lens product recognition is not perfect. Unusual or rare products
+     may produce poor or irrelevant results.
+
+  6. Google Proxy Links:
+     Some Shopping results return google.co.in as the domain. The server uses
+     the item.source field as a fallback domain in these cases, but source
+     text is not always a clean domain and may still be misclassified.
+
+  7. Category Heuristics:
+     The text-based heuristics (isSecondHandResult, isBulkResult, etc.) are
+     keyword-dependent and may misclassify products whose titles happen to
+     contain heuristic keywords (e.g. a product called "International Brand X"
+     could be misclassified as Global).
+
+  8. Single Backend / No Caching:
+     Every scan triggers two fresh SerpApi calls. There is no result caching.
+     High-frequency usage will rapidly exhaust the SerpApi quota.
+
+POTENTIAL FUTURE IMPROVEMENTS
+
+  - Split main.dart into separate files (models/, screens/, widgets/, services/)
+  - Add real caching (Redis or in-memory LRU) for repeated product scans
+  - Implement barcode/QR scanning (the button exists in UI but has no action yet)
+  - Implement gallery image picker (the button exists in UI but has no action yet)
+  - Replace PhonePe demo checkout with a real PhonePe SDK integration
+  - Add product detail page with price history graphs
+  - Add user favorites / scan history (Supabase or local SQLite)
+  - Replace domainMap.js with a database-backed admin UI for easier maintenance
+  - Add ML-based re-ranking to improve product relevance beyond score heuristics
+  - Support multiple languages / regions (currently India-only biased)
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
