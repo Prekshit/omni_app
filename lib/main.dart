@@ -12,6 +12,7 @@ import 'package:flutter/rendering.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:image_picker/image_picker.dart';
 import 'dart:math' as math;
 
 
@@ -194,6 +195,39 @@ class _ScannerScreenState
   String? cameraError;
   final GlobalKey scannerKey = GlobalKey();
   Rect? scannerRect;
+
+  Future<void> _pickGalleryImageAndSearch() async {
+    try {
+      final picker = ImagePicker();
+      final pickedFile = await picker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 90,
+      );
+
+      if (pickedFile == null) return;
+
+      final imageBytes = await pickedFile.readAsBytes();
+
+      if (!mounted) return;
+
+      Navigator.of(context).push(
+        PageRouteBuilder(
+          transitionDuration: Duration.zero,
+          reverseTransitionDuration: Duration.zero,
+          pageBuilder: (_, __, ___) => OmniScannerScreen(
+            controller: controller!,
+            preSelectedImageBytes: imageBytes,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to load gallery image: $e')),
+        );
+      }
+    }
+  }
 
   static const Color phonePePurple =
       Color(0xFF6A1BCE);
@@ -483,6 +517,7 @@ class _ScannerScreenState
                     scannerButton(
                       icon: Icons.image_outlined,
                       label: "Upload QR",
+                      onTap: _pickGalleryImageAndSearch,
                     ),
 
                     const SizedBox(width: 30),
@@ -524,34 +559,36 @@ class _ScannerScreenState
   Widget scannerButton({
     required IconData icon,
     required String label,
+    VoidCallback? onTap,
   }) {
-    return Column(
-      children: [
-
-        Container(
-          width: 68,
-          height: 68,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: Colors.white.withOpacity(0.12),
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        children: [
+          Container(
+            width: 68,
+            height: 68,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white.withOpacity(0.12),
+            ),
+            child: Icon(
+              icon,
+              color: Colors.white,
+              size: 32,
+            ),
           ),
-          child: Icon(
-            icon,
-            color: Colors.white,
-            size: 32,
+          const SizedBox(height: 10),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+            ),
           ),
-        ),
-
-        const SizedBox(height: 10),
-
-        Text(
-          label,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 16,
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -747,11 +784,13 @@ class OmniScannerScreen extends StatefulWidget {
     required this.controller,
     this.getController,
     this.onBarcodeScan,
+    this.preSelectedImageBytes,
   });
 
   final CameraController controller;
   final CameraController? Function()? getController;
   final Future<void> Function(Future<void> Function() action, VoidCallback onResume)? onBarcodeScan;
+  final Uint8List? preSelectedImageBytes;
 
   @override
   State<OmniScannerScreen> createState() => _OmniScannerScreenState();
@@ -777,6 +816,18 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
   double _cropR = 0.90, _cropB = 0.90;
   static const double _kCropMinDim = 0.15;
   // ─────────────────────────────────────────────────────────────────────────
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.preSelectedImageBytes != null) {
+      _scannerMode = _ScannerMode.cropMode;
+      _capturedImageBytes = widget.preSelectedImageBytes;
+      _decodeUiImage(widget.preSelectedImageBytes!).then((img) {
+        if (mounted) setState(() => _capturedUiImage = img);
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -946,7 +997,11 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            scanActionButton(icon: Icons.image_outlined, label: 'Gallery'),
+            scanActionButton(
+              icon: Icons.image_outlined,
+              label: 'Gallery',
+              onTap: _pickGalleryImageAndSearch,
+            ),
             const SizedBox(width: 30),
             scanActionButton(
               icon: Icons.camera_alt_outlined,
@@ -1429,6 +1484,40 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
       _scannerMode = _ScannerMode.capturedWithSheet;
       _sheetDragOffset = 0;
     });
+  }
+
+  Future<void> _pickGalleryImageAndSearch() async {
+    try {
+      final picker = ImagePicker();
+      final pickedFile = await picker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 90,
+      );
+
+      if (pickedFile == null) return;
+
+      final imageBytes = await pickedFile.readAsBytes();
+
+      // Reset crop state for a fresh scan
+      _cropL = 0.10; _cropT = 0.10; _cropR = 0.90; _cropB = 0.90;
+      _cropAttemptCount = 0;
+
+      final uiImg = await _decodeUiImage(imageBytes);
+
+      setState(() {
+        _scannerMode = _ScannerMode.cropMode;
+        _capturedImageBytes = imageBytes;
+        _capturedUiImage = uiImg;
+        _currentSearchFuture = null;
+        _sheetDragOffset = 0;
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to load gallery image: $e')),
+        );
+      }
+    }
   }
 
   /// Captures a new photo (or uses [croppedBytes] for a re-search) and calls
@@ -4958,19 +5047,33 @@ class _ProductBrowserPageState extends State<ProductBrowserPage> {
       ),
       child: Column(
         children: [
-          // Reformed Top Header
-          _buildReformedHeader(),
+          // Reformed Top Header — wrapped in drag detector for slide down functionality
+          GestureDetector(
+            onVerticalDragUpdate: (details) {
+              if (details.delta.dy > 8) {
+                Navigator.pop(context);
+              }
+            },
+            behavior: HitTestBehavior.opaque,
+            child: _buildReformedHeader(),
+          ),
           
           // WebView Body
           Expanded(
             child: Stack(
               children: [
-                // WebView component inside rounded ClipRRect
-                ClipRRect(
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-                  child: Container(
-                    color: Colors.white,
-                    child: WebViewWidget(controller: _controller),
+                // WebView component positioned with bottom: 84 to prevent overlapping web page elements
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 84, // Dedicated plum gutter area for the floating bar
+                  child: ClipRRect(
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+                    child: Container(
+                      color: Colors.white,
+                      child: WebViewWidget(controller: _controller),
+                    ),
                   ),
                 ),
                 
@@ -4992,9 +5095,9 @@ class _ProductBrowserPageState extends State<ProductBrowserPage> {
                     ),
                   ),
 
-                // Floating glassmorphic pill footer bar (organic footer design)
+                // Floating glassmorphic pill footer bar (organic footer design) hovering in the bottom gutter
                 Positioned(
-                  bottom: 24,
+                  bottom: 16, // Beautifully hovering inside the 84px gutter
                   left: 20,
                   right: 20,
                   child: Container(

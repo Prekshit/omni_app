@@ -908,11 +908,25 @@ function summarizeCategories(groupedCategories) {
 }
 
 function toOmniProduct(item, fallbackRank, sourceType = 'lens') {
-  const shoppingLink = firstString(
+  let shoppingLink = firstString(
     item.link,
     item.product_link,
     item.redirect_link,
   );
+
+  // Unpack Google Shopping redirects to fetch direct merchant product links directly
+  if (shoppingLink && (shoppingLink.includes('google.') || shoppingLink.includes('/url'))) {
+    try {
+      const urlObj = new URL(shoppingLink);
+      const directUrl = urlObj.searchParams.get('url') || 
+                        urlObj.searchParams.get('adurl') || 
+                        urlObj.searchParams.get('q');
+      if (directUrl && (directUrl.startsWith('http://') || directUrl.startsWith('https://'))) {
+        shoppingLink = directUrl;
+      }
+    } catch (_) {}
+  }
+
   let domain = extractDomain(shoppingLink);
   const title = firstString(item.title, item.name);
   const source = firstString(item.source, item.seller, item.domain);
