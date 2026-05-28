@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:ui';
 import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
+import 'screens/barcode_scanner_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/rendering.dart';
@@ -137,7 +139,16 @@ bool isProductPhonePeEnabled(OmniProduct product, List<OmniProduct> categoryProd
 
 
 
+class MyHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)
+      ..badCertificateCallback = (X509Certificate cert, String host, int port) => true;
+  }
+}
+
 Future<void> main() async {
+  HttpOverrides.global = MyHttpOverrides();
 
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -187,12 +198,13 @@ class _ScannerScreenState
   static const Color phonePePurple =
       Color(0xFF6A1BCE);
 
-  @override
-  void initState() {
-    super.initState();
-
+  Future<void> _initializeCamera() async {
     if (cameras.isEmpty) {
-      cameraError = 'No camera found on this device.';
+      if (mounted) {
+        setState(() {
+          cameraError = 'No camera found on this device.';
+        });
+      }
       return;
     }
 
@@ -204,21 +216,42 @@ class _ScannerScreenState
 
     controller = cameraController;
 
-    cameraController.initialize().then((_) {
-      if (!mounted) return;
-      setState(() {});
-    }).catchError((_) {
-      if (!mounted) return;
-      setState(() {
-        cameraError = 'Unable to open the camera.';
-      });
-    });
+    try {
+      await cameraController.initialize();
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          cameraError = 'Unable to open the camera.';
+        });
+      }
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeCamera();
   }
 
   @override
   void dispose() {
     controller?.dispose();
     super.dispose();
+  }
+
+  Future<void> suspendAndResumeCameraForBarcode(
+      Future<void> Function() action, VoidCallback onResume) async {
+    if (controller != null) {
+      await controller!.dispose();
+      controller = null;
+      if (mounted) setState(() {});
+    }
+    await action();
+    await _initializeCamera();
+    onResume();
   }
 
   void updateScannerRect() {
@@ -534,6 +567,8 @@ class _ScannerScreenState
             reverseTransitionDuration: Duration.zero,
             pageBuilder: (_, __, ___) => OmniScannerScreen(
               controller: cameraController,
+              getController: () => controller,
+              onBarcodeScan: suspendAndResumeCameraForBarcode,
             ),
           ),
         );
@@ -710,9 +745,13 @@ class OmniScannerScreen extends StatefulWidget {
   const OmniScannerScreen({
     super.key,
     required this.controller,
+    this.getController,
+    this.onBarcodeScan,
   });
 
   final CameraController controller;
+  final CameraController? Function()? getController;
+  final Future<void> Function(Future<void> Function() action, VoidCallback onResume)? onBarcodeScan;
 
   @override
   State<OmniScannerScreen> createState() => _OmniScannerScreenState();
@@ -722,7 +761,7 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
   static const Color scannerDarkPlum = Color(0xFF360816);
   bool isCapturing = false;
 
-  CameraController get controller => widget.controller;
+  CameraController get controller => widget.getController?.call() ?? widget.controller;
 
   // ── Crop / sheet state ────────────────────────────────────────────────────
   _ScannerMode _scannerMode = _ScannerMode.liveCamera;
@@ -731,6 +770,7 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
   int _cropAttemptCount = 0;
   Future<List<OmniCategory>>? _currentSearchFuture;
   double _sheetDragOffset = 0;     // 0 = fully at H_max; increases as sheet slides down
+  bool _isBarcodeSearch = false;
 
   // Crop rect corners, normalised to [0, 1] of screen dimensions
   double _cropL = 0.10, _cropT = 0.10;
@@ -753,8 +793,11 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
     final sheetTop = screenSize.height - sheetH + _sheetDragOffset;
 
     return PopScope(
-      canPop: false,
-      onPopInvoked: (_) => _handleBackButton(),
+      canPop: _scannerMode == _ScannerMode.liveCamera,
+      onPopInvoked: (didPop) {
+        if (didPop) return;
+        _handleBackButton();
+      },
       child: Scaffold(
         backgroundColor: Colors.black,
         body: Stack(
@@ -911,7 +954,11 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
               onTap: searchWithCamera,
             ),
             const SizedBox(width: 30),
-            scanActionButton(customIcon: const BarcodeScanIcon(), label: 'Barcode'),
+            scanActionButton(
+              customIcon: const BarcodeScanIcon(),
+              label: 'Barcode',
+              onTap: _startBarcodeScan,
+            ),
           ],
         ),
       ],
@@ -960,6 +1007,7 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
                       searchFuture: _currentSearchFuture!,
                       transparent: true,
                       onDismiss: _switchToCropMode,
+                      isBarcode: _isBarcodeSearch,
                     ),
                   ),
               ],
@@ -1282,6 +1330,91 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
     );
   }
 
+  Future<void> _startBarcodeScan() async {
+    final Future<void> Function() action = () async {
+      final String? barcode = await Navigator.of(context).push<String>(
+        MaterialPageRoute(
+          builder: (context) => const BarcodeScannerScreen(),
+        ),
+      );
+
+      if (barcode == null || barcode.isEmpty) return;
+
+      final future = _searchBarcodeProducts(barcode);
+      setState(() {
+        _isBarcodeSearch = true;
+        _currentSearchFuture = future;
+        _scannerMode = _ScannerMode.capturedWithSheet;
+        _sheetDragOffset = 0;
+      });
+    };
+
+    if (widget.onBarcodeScan != null) {
+      await widget.onBarcodeScan!(action, () {
+        if (mounted) setState(() {});
+      });
+    } else {
+      await action();
+    }
+  }
+
+  Future<List<OmniCategory>> _searchBarcodeProducts(String barcode) async {
+    if (mounted) setState(() => isCapturing = true);
+
+    try {
+      final barcodeEndpoint = omniSearchEndpoint.replaceAll('/visual-search', '/barcode-search');
+      
+      final response = await http.post(
+        Uri.parse(barcodeEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'barcode': barcode}),
+      ).timeout(
+        const Duration(seconds: 40),
+        onTimeout: () {
+          throw TimeoutException(
+            'The backend did not respond in time. Check Wi-Fi/firewall.',
+          );
+        },
+      );
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw OmniSearchException(
+          readErrorMessage(response.body) ??
+              'Barcode search failed with status ${response.statusCode}.',
+        );
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final categoriesJson = data['categories'];
+      List<OmniCategory> parsedCategories = [];
+
+      if (categoriesJson is List) {
+        parsedCategories = categoriesJson
+            .whereType<Map<String, dynamic>>()
+            .map(OmniCategory.fromJson)
+            .toList();
+      } else {
+        final productsJson = data['products'];
+        if (productsJson is List) {
+          parsedCategories = [
+            OmniCategory(
+              id: 'all',
+              title: 'Barcode Matches',
+              products: productsJson
+                  .whereType<Map<String, dynamic>>()
+                  .map(OmniProduct.fromJson)
+                  .toList(),
+            ),
+          ];
+        }
+      }
+
+      return _fillMissingPhonePePrices(parsedCategories);
+    } finally {
+      if (mounted) setState(() => isCapturing = false);
+    }
+  }
+
   void searchWithCamera() {
     if (isCapturing || controller.value.isTakingPicture) return;
 
@@ -1291,6 +1424,7 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
 
     final future = captureAndSearchProducts();
     setState(() {
+      _isBarcodeSearch = false;
       _currentSearchFuture = future;
       _scannerMode = _ScannerMode.capturedWithSheet;
       _sheetDragOffset = 0;
@@ -1621,6 +1755,7 @@ class OmniProductsSheet extends StatelessWidget {
     required this.searchFuture,
     this.onDismiss,
     this.transparent = false,
+    this.isBarcode = false,
   });
 
   final Future<List<OmniCategory>> searchFuture;
@@ -1630,6 +1765,7 @@ class OmniProductsSheet extends StatelessWidget {
   /// When true, omits the background decoration and SafeArea so the
   /// embedding widget can provide its own frosted container.
   final bool transparent;
+  final bool isBarcode;
 
   static const Color sheetBackground = Color(0xFF360816);
   static const Color cardBackground = Colors.white;
@@ -1657,7 +1793,7 @@ class OmniProductsSheet extends StatelessWidget {
         future: searchFuture,
         builder: (context, snapshot) {
           if (snapshot.connectionState != ConnectionState.done) {
-            return const OmniPhonePeRadarLoader();
+            return OmniPhonePeRadarLoader(isBarcode: isBarcode);
           }
 
           if (snapshot.hasError) {
@@ -1675,8 +1811,8 @@ class OmniProductsSheet extends StatelessWidget {
           if (totalProducts == 0) {
             return OmniSheetMessage(
               icon: const Icon(Icons.search_off, color: Colors.white, size: 42),
-              title: 'No products found',
-              message: 'Try again with the product clearly in frame.',
+              title: isBarcode ? 'No matching product found' : 'No products found',
+              message: isBarcode ? 'Try scanning a clearer barcode.' : 'Try again with the product clearly in frame.',
               onClose: onDismiss,
             );
           }
@@ -3975,7 +4111,9 @@ Thank you for choosing PhonePe Partner Checkout!
 }
 
 class OmniPhonePeRadarLoader extends StatefulWidget {
-  const OmniPhonePeRadarLoader({super.key});
+  const OmniPhonePeRadarLoader({super.key, this.isBarcode = false});
+
+  final bool isBarcode;
 
   @override
   State<OmniPhonePeRadarLoader> createState() => _OmniPhonePeRadarLoaderState();
@@ -3997,6 +4135,16 @@ class _OmniPhonePeRadarLoaderState extends State<OmniPhonePeRadarLoader>
     {'text': 'Setting up the aisle. Get your digital wallet ready!', 'duration': 1000},
   ];
 
+  static const List<Map<String, dynamic>> _barcodeLoadingSteps = [
+    {'text': 'Fetching product details...', 'duration': 1500},
+    {'text': 'Checking marketplaces...', 'duration': 1500},
+    {'text': 'Looking across Fetch partners...', 'duration': 1500},
+    {'text': 'Matching barcode with online listings...', 'duration': 2000},
+    {'text': 'Preparing your shopping results...', 'duration': 1500},
+  ];
+
+  List<Map<String, dynamic>> get _steps => widget.isBarcode ? _barcodeLoadingSteps : _loadingSteps;
+
   @override
   void initState() {
     super.initState();
@@ -4009,8 +4157,8 @@ class _OmniPhonePeRadarLoaderState extends State<OmniPhonePeRadarLoader>
   }
 
   void _startStepping() {
-    if (_currentStep < _loadingSteps.length - 1) {
-      final currentDuration = _loadingSteps[_currentStep]['duration'] as int;
+    if (_currentStep < _steps.length - 1) {
+      final currentDuration = _steps[_currentStep]['duration'] as int;
       _timer = Timer(Duration(milliseconds: currentDuration), () {
         if (mounted) {
           setState(() {
@@ -4170,7 +4318,7 @@ class _OmniPhonePeRadarLoaderState extends State<OmniPhonePeRadarLoader>
                         },
                         child: Text(
                           key: ValueKey<int>(_currentStep),
-                          _loadingSteps[_currentStep]['text'] as String,
+                          _steps[_currentStep]['text'] as String,
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Colors.white.withOpacity(0.92),

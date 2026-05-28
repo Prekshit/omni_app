@@ -263,6 +263,234 @@ app.post(
   },
 );
 
+app.post(
+  '/api/barcode-search',
+  async (req, res) => {
+    const requestId = crypto.randomUUID().slice(0, 8);
+    const startedAt = Date.now();
+    const timingMs = {};
+
+    try {
+      const { barcode } = req.body;
+      if (!barcode) {
+        return res.status(400).json({
+          error: 'Missing barcode. Send JSON body with {"barcode": "value"}.',
+        });
+      }
+
+      log(`[${requestId}] Received barcode search request via Waterfall Cascade: ${barcode}`);
+
+      let stepStartedAt = Date.now();
+      const shoppingProducts = await searchProductsWaterfall(
+        barcode,
+        requestId,
+      );
+      timingMs.shoppingApi = Date.now() - stepStartedAt;
+
+      log(
+        `[${requestId}] Waterfall Cascade completed in ${timingMs.shoppingApi} ms`,
+      );
+
+      stepStartedAt = Date.now();
+      // Since we don't have Lens results, our merged products are just the shopping products.
+      const scoredProducts = scoreProducts(shoppingProducts, barcode);
+      const groupedCategories = groupProductsByCategory(scoredProducts);
+      const categorySummary = summarizeCategories(groupedCategories);
+      timingMs.normalizeAndGroup = Date.now() - stepStartedAt;
+      timingMs.total = Date.now() - startedAt;
+
+      writeDebugJson(`${requestId}-barcode-products.json`, {
+        requestId,
+        barcode,
+        timingMs,
+        categorySummary,
+        sourceSummary: {
+          lens: 0,
+          shopping: shoppingProducts.length,
+          merged: scoredProducts.length,
+        },
+        categories: groupedCategories,
+        products: scoredProducts,
+      });
+
+      log(
+        `[${requestId}] Found ${scoredProducts.length} products in ${timingMs.total} ms for barcode ${barcode}`,
+        timingMs,
+        categorySummary,
+      );
+
+      return res.json({
+        products: scoredProducts,
+        barcode,
+        timingMs,
+        categorySummary,
+        sourceSummary: {
+          lens: 0,
+          shopping: shoppingProducts.length,
+          merged: scoredProducts.length,
+        },
+        categories: groupedCategories,
+      });
+    } catch (error) {
+      log(`[${requestId}] Barcode search failed:`, error);
+
+      return res.status(500).json({
+        error: 'Barcode search failed.',
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+);
+
+async function searchProductsWaterfall(barcode, requestId) {
+  log(`[${requestId}] Starting parallel multi-API search for barcode: ${barcode}`);
+  
+  const [offResult, upcResult, googleResult] = await Promise.all([
+    queryOpenFoodFacts(barcode, requestId),
+    queryUpcItemDb(barcode, requestId),
+    queryGoogleShopping(barcode, requestId),
+  ]);
+
+  // Combine and merge all products
+  const merged = mergeProducts(offResult, upcResult, googleResult);
+  log(`[${requestId}] Multi-API search completed. Total unique products merged: ${merged.length}`);
+  return merged;
+}
+
+async function queryOpenFoodFacts(barcode, requestId) {
+  try {
+    const offUrl = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json`;
+    log(`[${requestId}] Querying Open Food Facts: ${offUrl}`);
+    
+    const offController = new AbortController();
+    const offTimeout = setTimeout(() => offController.abort(), 3500); // 3.5s optimized timeout
+    
+    const offResponse = await fetch(offUrl, {
+      signal: offController.signal,
+      headers: {
+        'User-Agent': 'FetchApp/1.0.0 (support@fetch.com)'
+      }
+    }).finally(() => {
+      clearTimeout(offTimeout);
+    });
+    
+    if (offResponse.ok) {
+      const offData = await offResponse.json();
+      if (offData && offData.status === 1 && offData.product) {
+        const prod = offData.product;
+        const prodName = prod.product_name || 'Grocery Product';
+        const brand = prod.brands || 'FMCG Brand';
+        const image = prod.image_url || '';
+        
+        log(`[${requestId}] Open Food Facts found match: ${prodName}`);
+        
+        return [{
+          title: prodName + (prod.quantity ? ` (${prod.quantity})` : ''),
+          image: image,
+          price: '', // Grocery lookup is purely catalog metadata
+          source: brand,
+          shoppingLink: `https://world.openfoodfacts.org/product/${barcode}`,
+          domain: 'openfoodfacts.org',
+          visualRank: 1,
+          sourceType: 'shopping'
+        }];
+      }
+    }
+    log(`[${requestId}] Open Food Facts matched 0 items.`);
+    return [];
+  } catch (err) {
+    log(`[${requestId}] Open Food Facts query failed or timed out: ${err.message}`);
+    return [];
+  }
+}
+
+async function queryUpcItemDb(barcode, requestId) {
+  try {
+    const upcUrl = `https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(barcode)}`;
+    log(`[${requestId}] Querying UPC Item DB: ${upcUrl}`);
+    
+    const upcController = new AbortController();
+    const upcTimeout = setTimeout(() => upcController.abort(), 4000); // 4s optimized timeout
+    
+    const upcResponse = await fetch(upcUrl, {
+      signal: upcController.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Accept': 'application/json'
+      }
+    }).finally(() => {
+      clearTimeout(upcTimeout);
+    });
+    
+    if (upcResponse.ok) {
+      const upcData = await upcResponse.json();
+      writeDebugJson(`${requestId}-upcitemdb-raw.json`, upcData);
+      
+      if (upcData && upcData.items && upcData.items.length > 0) {
+        log(`[${requestId}] UPC Item DB found match: ${upcData.items[0].title}`);
+        const products = [];
+        
+        for (const item of upcData.items) {
+          const itemTitle = item.title || 'Scanned Product';
+          const itemImage = (item.images && item.images.length > 0) ? item.images[0] : '';
+          const itemBrand = item.brand || 'Retail Product';
+          
+          if (item.offers && item.offers.length > 0) {
+            for (const offer of item.offers) {
+              const offerCurrency = offer.currency === 'INR' ? '₹' : (offer.currency || '$');
+              const formattedPrice = offer.price ? `${offerCurrency}${offer.price}` : '';
+              
+              products.push({
+                title: offer.title || itemTitle,
+                image: offer.image || itemImage,
+                price: formattedPrice,
+                source: offer.merchant || offer.domain || 'Online Seller',
+                shoppingLink: offer.link || `https://www.google.com/search?q=${encodeURIComponent(itemTitle)}`,
+                domain: offer.domain || 'online',
+                visualRank: products.length + 1,
+                sourceType: 'shopping'
+              });
+            }
+          }
+          
+          const itemCurrency = item.currency === 'INR' ? '₹' : (item.currency || '$');
+          const lowestPrice = item.lowest_recorded_price ? `${itemCurrency}${item.lowest_recorded_price}` : '';
+          
+          products.push({
+            title: itemTitle,
+            image: itemImage,
+            price: lowestPrice,
+            source: itemBrand,
+            shoppingLink: `https://www.google.com/search?q=${encodeURIComponent(itemTitle)}`,
+            domain: itemBrand.toLowerCase().replace(/[^a-z0-9]/g, ''),
+            visualRank: products.length + 1,
+            sourceType: 'shopping'
+          });
+        }
+        
+        return products;
+      }
+    }
+    log(`[${requestId}] UPC Item DB matched 0 items.`);
+    return [];
+  } catch (err) {
+    log(`[${requestId}] UPC Item DB query failed or timed out: ${err.message}`);
+    return [];
+  }
+}
+
+async function queryGoogleShopping(barcode, requestId) {
+  try {
+    log(`[${requestId}] Querying Google Shopping Scraper with exact match...`);
+    const results = await searchProductsWithGoogleShopping('"' + barcode + '"', requestId);
+    log(`[${requestId}] Google Shopping Scraper found ${results.length} items.`);
+    return results;
+  } catch (err) {
+    log(`[${requestId}] Google Shopping exact-match query failed: ${err.message}`);
+    return [];
+  }
+}
+
 async function searchProductsWithGoogleLens(imageUrl, requestId) {
   const searchUrl = new URL('https://serpapi.com/search.json');
   searchUrl.searchParams.set('engine', 'google_lens');
