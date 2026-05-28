@@ -586,6 +586,15 @@ class OmniSearchException implements Exception {
   String toString() => message;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// CROP FEATURE: scanner mode state machine
+// ════════════════════════════════════════════════════════════════════════════
+enum _ScannerMode {
+  liveCamera,        // Normal live camera preview
+  capturedWithSheet, // Photo taken; frozen image in bg, sheet visible
+  cropMode,          // Sheet dismissed; crop rect visible on frozen image
+}
+
 class OmniScannerScreen extends StatefulWidget {
   const OmniScannerScreen({
     super.key,
@@ -604,113 +613,472 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
 
   CameraController get controller => widget.controller;
 
+  // ── Crop / sheet state ────────────────────────────────────────────────────
+  _ScannerMode _scannerMode = _ScannerMode.liveCamera;
+  Uint8List? _capturedImageBytes;  // original photo bytes — kept for re-crops
+  ui.Image? _capturedUiImage;      // decoded native image for dart:ui crop ops
+  int _cropAttemptCount = 0;
+  Future<List<OmniCategory>>? _currentSearchFuture;
+  double _sheetDragOffset = 0;     // 0 = fully at H_max; increases as sheet slides down
+
+  // Crop rect corners, normalised to [0, 1] of screen dimensions
+  double _cropL = 0.10, _cropT = 0.10;
+  double _cropR = 0.90, _cropB = 0.90;
+  static const double _kCropMinDim = 0.15;
+  // ─────────────────────────────────────────────────────────────────────────
+
+  @override
+  void dispose() {
+    _capturedUiImage?.dispose();
+    super.dispose();
+  }
+
+  // ── Main build ─────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        children: [
+    final screenSize = MediaQuery.of(context).size;
+    final sheetH = screenSize.height * 0.75;
+    final sheetTop = screenSize.height - sheetH + _sheetDragOffset;
 
-          // Fills the full screen while preserving the camera's native aspect
-          // ratio — cropping edges instead of stretching (same as Google Lens).
-          SizedBox.expand(
-            child: FittedBox(
-              fit: BoxFit.cover,
-              child: SizedBox(
-                width: controller.value.previewSize?.height ?? 1,
-                height: controller.value.previewSize?.width ?? 1,
-                child: CameraPreview(controller),
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (_) => _handleBackButton(),
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Stack(
+          children: [
+            // Layer 1: live camera preview OR frozen captured image
+            _buildBackground(),
+
+            // Layer 2: scanner viewfinder (live camera mode only)
+            if (_scannerMode == _ScannerMode.liveCamera)
+              SafeArea(child: _buildScannerUI()),
+
+            // Layer 3: crop overlay (crop mode only)
+            if (_scannerMode == _ScannerMode.cropMode)
+              _buildCropOverlay(screenSize),
+
+            // Layer 4: transparent tap zone above sheet + embedded sheet
+            if (_scannerMode == _ScannerMode.capturedWithSheet) ...[
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: sheetTop.clamp(0.0, screenSize.height),
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _switchToCropMode,
+                ),
               ),
+              _buildEmbeddedSheet(screenSize, sheetH, sheetTop),
+            ],
+
+            // Layer 5: crop action bar (crop mode only)
+            if (_scannerMode == _ScannerMode.cropMode)
+              _buildCropActionBar(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── Background ─────────────────────────────────────────────────────────────
+
+  Widget _buildBackground() {
+    if (_capturedImageBytes == null) {
+      return SizedBox.expand(
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: controller.value.previewSize?.height ?? 1,
+            height: controller.value.previewSize?.width ?? 1,
+            child: CameraPreview(controller),
+          ),
+        ),
+      );
+    }
+    return SizedBox.expand(
+      child: Image.memory(_capturedImageBytes!, fit: BoxFit.cover),
+    );
+  }
+
+  // ── Scanner viewfinder UI (live camera mode) ───────────────────────────────
+
+  Widget _buildScannerUI() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+          child: Row(
+            children: [
+              GestureDetector(
+                onTap: () => Navigator.of(context).pop(),
+                child: const Icon(Icons.arrow_back, color: Colors.white, size: 28),
+              ),
+              const SizedBox(width: 16),
+              const Expanded(
+                child: Text(
+                  'Scan & Shop',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 26,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 70),
+        Center(
+          child: SizedBox(
+            width: 265,
+            height: 265,
+            child: CustomPaint(
+              painter: ScannerCornerPainter(color: scannerDarkPlum),
             ),
           ),
+        ),
+        const SizedBox(height: 55),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            scanActionButton(icon: Icons.image_outlined, label: 'Gallery'),
+            const SizedBox(width: 30),
+            scanActionButton(
+              icon: Icons.camera_alt_outlined,
+              label: 'Click',
+              onTap: searchWithCamera,
+            ),
+            const SizedBox(width: 30),
+            scanActionButton(customIcon: const BarcodeScanIcon(), label: 'Barcode'),
+          ],
+        ),
+      ],
+    );
+  }
 
-          SafeArea(
+  // ── Embedded bottom sheet ──────────────────────────────────────────────────
+
+  Widget _buildEmbeddedSheet(Size screenSize, double sheetH, double sheetTop) {
+    return Positioned(
+      top: sheetTop.clamp(screenSize.height - sheetH, screenSize.height),
+      left: 0,
+      right: 0,
+      height: sheetH,
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+          child: Container(
+            color: scannerDarkPlum.withOpacity(0.93),
             child: Column(
               children: [
-
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 10,
-                  ),
-                  child: Row(
-                    children: [
-
-                      GestureDetector(
-                        onTap: () {
-                          Navigator.of(context).pop();
-                        },
-                        child: const Icon(
-                          Icons.arrow_back,
-                          color: Colors.white,
-                          size: 28,
-                        ),
-                      ),
-
-                      const SizedBox(width: 16),
-
-                      const Expanded(
-                        child: Text(
-                          "Scan & Shop",
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 26,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                const SizedBox(height: 70),
-
-                Center(
-                  child: SizedBox(
-                    width: 265,
-                    height: 265,
-                    child: CustomPaint(
-                      painter: ScannerCornerPainter(
-                        color: scannerDarkPlum,
+                // Drag handle — the only drag-sensitive area on the sheet
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onVerticalDragUpdate: _onSheetDragUpdate,
+                  onVerticalDragEnd: _onSheetDragEnd,
+                  child: Container(
+                    width: double.infinity,
+                    height: 40,
+                    alignment: Alignment.center,
+                    child: Container(
+                      width: 38,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.35),
+                        borderRadius: BorderRadius.circular(2),
                       ),
                     ),
                   ),
                 ),
-
-                const SizedBox(height: 55),
-
-                Row(
-                  mainAxisAlignment:
-                      MainAxisAlignment.center,
-                  children: [
-
-                    scanActionButton(
-                      icon: Icons.image_outlined,
-                      label: "Gallery",
+                // Sheet content — normal scroll behaviour below the handle
+                if (_currentSearchFuture != null)
+                  Expanded(
+                    child: OmniProductsSheet(
+                      searchFuture: _currentSearchFuture!,
+                      transparent: true,
+                      onDismiss: _switchToCropMode,
                     ),
-
-                    const SizedBox(width: 30),
-
-                    scanActionButton(
-                      icon: Icons.camera_alt_outlined,
-                      label: "Click",
-                      onTap: searchWithCamera,
-                    ),
-
-                    const SizedBox(width: 30),
-
-                    scanActionButton(
-                      customIcon: const BarcodeScanIcon(),
-                      label: "Barcode",
-                    ),
-                  ],
-                ),
+                  ),
               ],
             ),
           ),
-        ],
+        ),
       ),
     );
+  }
+
+  void _onSheetDragUpdate(DragUpdateDetails d) {
+    final maxOffset = MediaQuery.of(context).size.height * 0.75;
+    setState(() {
+      _sheetDragOffset = (_sheetDragOffset + d.delta.dy).clamp(0.0, maxOffset);
+    });
+  }
+
+  void _onSheetDragEnd(DragEndDetails d) {
+    final screenH = MediaQuery.of(context).size.height;
+    final sheetH = screenH * 0.75;
+    final visibleH = sheetH - _sheetDragOffset;
+    final velocity = d.primaryVelocity ?? 0;
+
+    if (visibleH < screenH * 0.40 || velocity > 800) {
+      // Crossed dismiss threshold or fast downward flick → crop mode
+      setState(() {
+        _scannerMode = _ScannerMode.cropMode;
+        _sheetDragOffset = 0;
+      });
+      return;
+    }
+
+    if (velocity < -800) {
+      // Fast upward flick → snap to H_max
+      setState(() => _sheetDragOffset = 0.0);
+      return;
+    }
+
+    if (velocity < -800) {
+      // Fast upward flick → snap to H_max
+      setState(() => _sheetDragOffset = 0.0);
+      return;
+    }
+
+    // Default: always snap back to H_max (75% height)
+    setState(() => _sheetDragOffset = 0.0);
+  }
+
+  // ── Crop overlay ───────────────────────────────────────────────────────────
+
+  Widget _buildCropOverlay(Size screenSize) {
+    final w = screenSize.width;
+    final h = screenSize.height;
+    final l = _cropL * w;
+    final t = _cropT * h;
+    final r = _cropR * w;
+    final b = _cropB * h;
+    const double touchSz = 44.0;
+
+    return Stack(
+      children: [
+        // 30 % dark overlay outside the crop rect
+        Positioned.fill(
+          child: CustomPaint(
+            painter: _CropOverlayPainter(cropRect: Rect.fromLTRB(l, t, r, b)),
+          ),
+        ),
+        // Crop rect visual — corners + midlines (non-interactive)
+        Positioned(
+          left: l, top: t, width: r - l, height: b - t,
+          child: IgnorePointer(
+            child: CustomPaint(painter: CropRectPainter(color: scannerDarkPlum)),
+          ),
+        ),
+        // 4 corner handles (move both axes)
+        _cropHandle(l, t, touchSz, (dx, dy) {
+          _cropL = (_cropL + dx / w).clamp(0.0, _cropR - _kCropMinDim);
+          _cropT = (_cropT + dy / h).clamp(0.0, _cropB - _kCropMinDim);
+        }),
+        _cropHandle(r, t, touchSz, (dx, dy) {
+          _cropR = (_cropR + dx / w).clamp(_cropL + _kCropMinDim, 1.0);
+          _cropT = (_cropT + dy / h).clamp(0.0, _cropB - _kCropMinDim);
+        }),
+        _cropHandle(l, b, touchSz, (dx, dy) {
+          _cropL = (_cropL + dx / w).clamp(0.0, _cropR - _kCropMinDim);
+          _cropB = (_cropB + dy / h).clamp(_cropT + _kCropMinDim, 1.0);
+        }),
+        _cropHandle(r, b, touchSz, (dx, dy) {
+          _cropR = (_cropR + dx / w).clamp(_cropL + _kCropMinDim, 1.0);
+          _cropB = (_cropB + dy / h).clamp(_cropT + _kCropMinDim, 1.0);
+        }),
+        // 4 edge midpoint handles (move single axis each)
+        _cropHandle((l + r) / 2, t, touchSz, (dx, dy) {
+          _cropT = (_cropT + dy / h).clamp(0.0, _cropB - _kCropMinDim);
+        }),
+        _cropHandle((l + r) / 2, b, touchSz, (dx, dy) {
+          _cropB = (_cropB + dy / h).clamp(_cropT + _kCropMinDim, 1.0);
+        }),
+        _cropHandle(l, (t + b) / 2, touchSz, (dx, dy) {
+          _cropL = (_cropL + dx / w).clamp(0.0, _cropR - _kCropMinDim);
+        }),
+        _cropHandle(r, (t + b) / 2, touchSz, (dx, dy) {
+          _cropR = (_cropR + dx / w).clamp(_cropL + _kCropMinDim, 1.0);
+        }),
+      ],
+    );
+  }
+
+  /// Transparent 44 × 44 drag handle centred at (cx, cy).
+  Widget _cropHandle(
+      double cx, double cy, double sz, void Function(double, double) onDelta) {
+    return Positioned(
+      left: cx - sz / 2,
+      top: cy - sz / 2,
+      width: sz,
+      height: sz,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onPanUpdate: (d) => setState(() => onDelta(d.delta.dx, d.delta.dy)),
+      ),
+    );
+  }
+
+  // ── Crop action bar ────────────────────────────────────────────────────────
+
+  Widget _buildCropActionBar() {
+    return Positioned(
+      bottom: 0,
+      left: 0,
+      right: 0,
+      child: SafeArea(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Colors.transparent, Colors.black.withOpacity(0.72)],
+            ),
+          ),
+          child: Row(
+            children: [
+              TextButton(
+                onPressed: _goToLiveCamera,
+                child: const Text(
+                  'New Scan',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const Spacer(),
+              InkWell(
+                onTap: isCapturing ? null : _performCropAndSearch,
+                borderRadius: BorderRadius.circular(24),
+                child: Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: isCapturing
+                        ? scannerDarkPlum.withOpacity(0.5)
+                        : scannerDarkPlum,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Center(
+                    child: isCapturing
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Icon(Icons.check, color: Colors.white, size: 24),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── State transitions ──────────────────────────────────────────────────────
+
+  void _handleBackButton() {
+    switch (_scannerMode) {
+      case _ScannerMode.liveCamera:
+        Navigator.of(context).pop();
+      case _ScannerMode.capturedWithSheet:
+        if (_cropAttemptCount == 0) {
+          // First scan, no crop yet → go straight to live camera
+          _goToLiveCamera();
+        } else {
+          // Had previous crops → show crop mode for further adjustments
+          _switchToCropMode();
+        }
+      case _ScannerMode.cropMode:
+        _goToLiveCamera();
+    }
+  }
+
+  void _switchToCropMode() {
+    setState(() {
+      _scannerMode = _ScannerMode.cropMode;
+      _sheetDragOffset = 0;
+    });
+  }
+
+  void _goToLiveCamera() {
+    _capturedUiImage?.dispose();
+    setState(() {
+      _scannerMode = _ScannerMode.liveCamera;
+      _capturedImageBytes = null;
+      _capturedUiImage = null;
+      _cropAttemptCount = 0;
+      _currentSearchFuture = null;
+      _sheetDragOffset = 0;
+      _cropL = 0.10; _cropT = 0.10; _cropR = 0.90; _cropB = 0.90;
+    });
+    resumeCameraPreview();
+  }
+
+  // ── Crop & re-search ───────────────────────────────────────────────────────
+
+  Future<void> _performCropAndSearch() async {
+    if (_capturedUiImage == null || _capturedImageBytes == null || isCapturing) return;
+
+    final croppedBytes = await _cropImageToBytes(
+      _capturedUiImage!, _cropL, _cropT, _cropR, _cropB,
+    );
+    _cropAttemptCount++;
+
+    final screenH = MediaQuery.of(context).size.height;
+    final sheetH = screenH * 0.75;
+
+    final future = captureAndSearchProducts(croppedBytes: croppedBytes);
+    setState(() {
+      _currentSearchFuture = future;
+      _scannerMode = _ScannerMode.capturedWithSheet;
+      // Always open at H_max
+      _sheetDragOffset = 0.0;
+    });
+  }
+
+  Future<Uint8List> _cropImageToBytes(
+    ui.Image img,
+    double normL, double normT, double normR, double normB,
+  ) async {
+    final srcW = img.width.toDouble();
+    final srcH = img.height.toDouble();
+    final srcRect =
+        Rect.fromLTRB(normL * srcW, normT * srcH, normR * srcW, normB * srcH);
+    final dstW = srcRect.width.round().clamp(1, 9999999);
+    final dstH = srcRect.height.round().clamp(1, 9999999);
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.drawImageRect(
+      img,
+      srcRect,
+      Rect.fromLTWH(0, 0, dstW.toDouble(), dstH.toDouble()),
+      Paint(),
+    );
+    final picture = recorder.endRecording();
+    final croppedImg = await picture.toImage(dstW, dstH);
+    final byteData = await croppedImg.toByteData(format: ui.ImageByteFormat.png);
+    return byteData!.buffer.asUint8List();
+  }
+
+  Future<ui.Image> _decodeUiImage(Uint8List bytes) async {
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    return frame.image;
   }
 
   Widget scanActionButton({
@@ -756,61 +1124,58 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
   }
 
   void searchWithCamera() {
-    if (isCapturing || controller.value.isTakingPicture) {
-      return;
-    }
+    if (isCapturing || controller.value.isTakingPicture) return;
 
-    final searchFuture = captureAndSearchProducts();
+    // Reset crop state for a fresh scan
+    _cropL = 0.10; _cropT = 0.10; _cropR = 0.90; _cropB = 0.90;
+    _cropAttemptCount = 0;
 
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
-      enableDrag: false,
-      isDismissible: false,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(
-          top: Radius.circular(28),
-        ),
-      ),
-      builder: (context) {
-        return OmniProductsSheet(
-          searchFuture: searchFuture,
-        );
-      },
-    );
+    final future = captureAndSearchProducts();
+    setState(() {
+      _currentSearchFuture = future;
+      _scannerMode = _ScannerMode.capturedWithSheet;
+      _sheetDragOffset = 0;
+    });
   }
 
-  Future<List<OmniCategory>> captureAndSearchProducts() async {
-    setState(() {
-      isCapturing = true;
-    });
+  /// Captures a new photo (or uses [croppedBytes] for a re-search) and calls
+  /// the backend. Does NOT resume camera preview — the frozen image stays
+  /// visible for potential follow-up crops.
+  Future<List<OmniCategory>> captureAndSearchProducts({Uint8List? croppedBytes}) async {
+    setState(() => isCapturing = true);
 
     try {
-      final photo = await controller.takePicture();
-      final request = http.MultipartRequest(
-        'POST',
-        Uri.parse(omniSearchEndpoint),
-      );
+      final Uint8List imageBytes;
 
+      if (croppedBytes != null) {
+        // Re-search with a cropped region — use the provided bytes directly.
+        imageBytes = croppedBytes;
+      } else {
+        // Initial capture — take photo and store original for future crops.
+        final photo = await controller.takePicture();
+        imageBytes = await photo.readAsBytes();
+        // Store immediately so the UI shows the frozen image right away.
+        if (mounted) setState(() => _capturedImageBytes = imageBytes);
+        // Decode for dart:ui crop ops — fire and forget (network call is slower).
+        _decodeUiImage(imageBytes).then((img) {
+          if (mounted) setState(() => _capturedUiImage = img);
+        });
+      }
+
+      final request = http.MultipartRequest('POST', Uri.parse(omniSearchEndpoint));
       request.files.add(
-        await http.MultipartFile.fromPath(
-          'image',
-          photo.path,
-        ),
+        http.MultipartFile.fromBytes('image', imageBytes, filename: 'scan.jpg'),
       );
 
       final streamedResponse = await request.send().timeout(
         const Duration(seconds: 60),
-
         onTimeout: () {
           throw TimeoutException(
             'The backend did not respond in time. Check Wi-Fi/firewall.',
           );
         },
       );
-      final response =
-          await http.Response.fromStream(streamedResponse);
+      final response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw OmniSearchException(
@@ -821,7 +1186,6 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final categoriesJson = data['categories'];
-
       List<OmniCategory> parsedCategories = [];
 
       if (categoriesJson is List) {
@@ -832,15 +1196,14 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
       } else {
         final productsJson = data['products'];
         if (productsJson is List) {
-          final products = productsJson
-              .whereType<Map<String, dynamic>>()
-              .map(OmniProduct.fromJson)
-              .toList();
           parsedCategories = [
             OmniCategory(
               id: 'all',
               title: 'All Matches',
-              products: products,
+              products: productsJson
+                  .whereType<Map<String, dynamic>>()
+                  .map(OmniProduct.fromJson)
+                  .toList(),
             ),
           ];
         }
@@ -848,13 +1211,8 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
 
       return _fillMissingPhonePePrices(parsedCategories);
     } finally {
-      await resumeCameraPreview();
-
-      if (mounted) {
-        setState(() {
-          isCapturing = false;
-        });
-      }
+      // Do NOT resume camera preview — frozen image stays for crop mode.
+      if (mounted) setState(() => isCapturing = false);
     }
   }
 
@@ -1099,9 +1457,17 @@ class OmniProductsSheet extends StatelessWidget {
   const OmniProductsSheet({
     super.key,
     required this.searchFuture,
+    this.onDismiss,
+    this.transparent = false,
   });
 
   final Future<List<OmniCategory>> searchFuture;
+  /// Called when the user taps the close button. If null, falls back to
+  /// [Navigator.pop] (used when sheet is a modal).
+  final VoidCallback? onDismiss;
+  /// When true, omits the background decoration and SafeArea so the
+  /// embedding widget can provide its own frosted container.
+  final bool transparent;
 
   static const Color sheetBackground = Color(0xFF360816);
   static const Color cardBackground = Colors.white;
@@ -1111,103 +1477,90 @@ class OmniProductsSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: Container(
-        padding: const EdgeInsets.all(22),
-        decoration: const BoxDecoration(
-          color: sheetBackground,
-          borderRadius: BorderRadius.vertical(
-            top: Radius.circular(28),
-          ),
-        ),
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.78,
-          minHeight: 430,
-        ),
-        child: FutureBuilder<List<OmniCategory>>(
-          future: searchFuture,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState != ConnectionState.done) {
-              return const OmniPhonePeRadarLoader();
-            }
+    final body = Container(
+      padding: const EdgeInsets.all(22),
+      decoration: transparent
+          ? null
+          : const BoxDecoration(
+              color: sheetBackground,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+            ),
+      constraints: transparent
+          ? null
+          : BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.78,
+              minHeight: 430,
+            ),
+      child: FutureBuilder<List<OmniCategory>>(
+        future: searchFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const OmniPhonePeRadarLoader();
+          }
 
-            if (snapshot.hasError) {
-              return OmniSheetMessage(
-                icon: const Icon(
-                  Icons.error_outline,
-                  color: Colors.white,
-                  size: 42,
-                ),
-                title: "Search failed",
-                message: snapshot.error.toString(),
-              );
-            }
-
-            final categories = snapshot.data ?? [];
-            final totalProducts = categories.fold<int>(
-              0,
-              (total, category) => total + category.products.length,
+          if (snapshot.hasError) {
+            return OmniSheetMessage(
+              icon: const Icon(Icons.error_outline, color: Colors.white, size: 42),
+              title: 'Search failed',
+              message: snapshot.error.toString(),
             );
+          }
 
-            if (totalProducts == 0) {
-              return const OmniSheetMessage(
-                icon: Icon(
-                  Icons.search_off,
-                  color: Colors.white,
-                  size: 42,
-                ),
-                title: "No products found",
-                message: "Try again with the product clearly in frame.",
-              );
-            }
+          final categories = snapshot.data ?? [];
+          final totalProducts = categories.fold<int>(
+            0, (total, cat) => total + cat.products.length);
 
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+          if (totalProducts == 0) {
+            return OmniSheetMessage(
+              icon: const Icon(Icons.search_off, color: Colors.white, size: 42),
+              title: 'No products found',
+              message: 'Try again with the product clearly in frame.',
+              onClose: onDismiss,
+            );
+          }
 
-                Row(
-                  children: [
-
-                    const Expanded(
-                      child: Text(
-                        "Similar Products Found",
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-
-                    IconButton(
-                      onPressed: () {
-                        Navigator.of(context).pop();
-                      },
-                      icon: const Icon(
-                        Icons.close,
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Similar Products Found',
+                      style: TextStyle(
                         color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
+                  ),
+                  IconButton(
+                    onPressed: () {
+                      if (onDismiss != null) {
+                        onDismiss!();
+                      } else {
+                        Navigator.of(context).pop();
+                      }
+                    },
+                    icon: const Icon(Icons.close, color: Colors.white),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              Expanded(
+                child: ListView(
+                  children: [
+                    for (final category in categories)
+                      categoryRail(context, category),
                   ],
                 ),
-
-                const SizedBox(height: 18),
-
-                Expanded(
-                  child: ListView(
-                    children: [
-
-                      for (final category in categories)
-                        categoryRail(context, category),
-                    ],
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
+              ),
+            ],
+          );
+        },
       ),
     );
+    return transparent ? body : SafeArea(child: body);
   }
 
   Widget categoryRail(
@@ -1880,11 +2233,13 @@ class OmniSheetMessage extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.message,
+    this.onClose,
   });
 
   final Widget icon;
   final String title;
   final String message;
+  final VoidCallback? onClose;
 
   static const Color textDark = Color(0xFF231A1A);
   static const Color textMuted = Color(0xFF6E6257);
@@ -1930,10 +2285,14 @@ class OmniSheetMessage extends StatelessWidget {
 
           TextButton(
             onPressed: () {
-              Navigator.of(context).pop();
+              if (onClose != null) {
+                onClose!();
+              } else {
+                Navigator.of(context).pop();
+              }
             },
             child: const Text(
-              "Close",
+              'Close',
               style: TextStyle(
                 color: Colors.white,
                 fontSize: 16,
@@ -2197,6 +2556,92 @@ class ScannerCornerPainter extends CustomPainter {
     return oldDelegate is! ScannerCornerPainter ||
         oldDelegate.color != color;
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// CROP FEATURE: CROP RECT PAINTER & OVERLAY PAINTER
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Draws the interactive crop rectangle on the captured image.
+/// Style: 4 rounded L-corner brackets + 4 edge midpoint lines, identical in
+/// appearance to [ScannerCornerPainter]. No connecting lines between corners.
+class CropRectPainter extends CustomPainter {
+  const CropRectPainter({required this.color});
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 3.5
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
+    const double arm = 26.0;    // length of each L-bracket arm
+    const double radius = 12.0; // corner arc radius
+    const double midLen = 24.0; // length of edge midpoint line
+
+    final w = size.width;
+    final h = size.height;
+
+    // ── TOP LEFT ─────────────────────────────────────────────────────────────
+    canvas.drawArc(
+        Rect.fromLTWH(0, 0, radius * 2, radius * 2), math.pi, math.pi / 2, false, paint);
+    canvas.drawLine(Offset(radius, 0), Offset(arm, 0), paint);
+    canvas.drawLine(Offset(0, radius), Offset(0, arm), paint);
+
+    // ── TOP RIGHT ────────────────────────────────────────────────────────────
+    canvas.drawArc(
+        Rect.fromLTWH(w - radius * 2, 0, radius * 2, radius * 2), -math.pi / 2, math.pi / 2, false, paint);
+    canvas.drawLine(Offset(w - radius, 0), Offset(w - arm, 0), paint);
+    canvas.drawLine(Offset(w, radius), Offset(w, arm), paint);
+
+    // ── BOTTOM LEFT ──────────────────────────────────────────────────────────
+    canvas.drawArc(
+        Rect.fromLTWH(0, h - radius * 2, radius * 2, radius * 2), math.pi / 2, math.pi / 2, false, paint);
+    canvas.drawLine(Offset(radius, h), Offset(arm, h), paint);
+    canvas.drawLine(Offset(0, h - radius), Offset(0, h - arm), paint);
+
+    // ── BOTTOM RIGHT ─────────────────────────────────────────────────────────
+    canvas.drawArc(
+        Rect.fromLTWH(w - radius * 2, h - radius * 2, radius * 2, radius * 2), 0, math.pi / 2, false, paint);
+    canvas.drawLine(Offset(w - radius, h), Offset(w - arm, h), paint);
+    canvas.drawLine(Offset(w, h - radius), Offset(w, h - arm), paint);
+
+    // ── EDGE MIDPOINT LINES ───────────────────────────────────────────────────
+    // Top: horizontal segment centred on the top side
+    canvas.drawLine(Offset(w / 2 - midLen / 2, 0), Offset(w / 2 + midLen / 2, 0), paint);
+    // Bottom: horizontal segment centred on the bottom side
+    canvas.drawLine(Offset(w / 2 - midLen / 2, h), Offset(w / 2 + midLen / 2, h), paint);
+    // Left: vertical segment centred on the left side
+    canvas.drawLine(Offset(0, h / 2 - midLen / 2), Offset(0, h / 2 + midLen / 2), paint);
+    // Right: vertical segment centred on the right side
+    canvas.drawLine(Offset(w, h / 2 - midLen / 2), Offset(w, h / 2 + midLen / 2), paint);
+  }
+
+  @override
+  bool shouldRepaint(CropRectPainter old) => old.color != color;
+}
+
+/// Paints a 30 % dark overlay on the region OUTSIDE [cropRect], leaving
+/// the inside at full image brightness.
+class _CropOverlayPainter extends CustomPainter {
+  const _CropOverlayPainter({required this.cropRect});
+  final Rect cropRect;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawPath(
+      Path()
+        ..fillType = PathFillType.evenOdd
+        ..addRect(Offset.zero & size)
+        ..addRect(cropRect),
+      Paint()..color = Colors.black.withOpacity(0.30),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_CropOverlayPainter old) => old.cropRect != cropRect;
 }
 
 // ==========================================
@@ -3359,7 +3804,7 @@ class _OmniPhonePeRadarLoaderState extends State<OmniPhonePeRadarLoader>
           padding: const EdgeInsets.symmetric(vertical: 4.0),
           child: Row(
             children: [
-              SizedBox(
+              Container(
                 width: 24,
                 alignment: Alignment.center,
                 child: icon,
