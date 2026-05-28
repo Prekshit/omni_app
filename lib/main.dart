@@ -208,6 +208,15 @@ class _ScannerScreenState
 
       if (pickedFile == null) return;
 
+      if (controller == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Camera system is warming up...')),
+          );
+        }
+        return;
+      }
+
       final imageBytes = await pickedFile.readAsBytes();
 
       if (!mounted) return;
@@ -374,34 +383,6 @@ class _ScannerScreenState
       );
     }
 
-    if (cameraController == null ||
-        !cameraController.value.isInitialized) {
-      return Scaffold(
-        backgroundColor: Colors.black,
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Image.asset(
-                'assets/logos/fetch_logo_horizontal.png',
-                width: 220,
-                fit: BoxFit.contain,
-              ),
-              const SizedBox(height: 28),
-              const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(
-                  color: Color(0xFF360816), // Premium deep plum spinner
-                  strokeWidth: 2.5,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -409,7 +390,10 @@ class _ScannerScreenState
         children: [
 
           /// LIVE CAMERA PREVIEW
-          CameraPreview(cameraController),
+          if (cameraController != null && cameraController.value.isInitialized)
+            CameraPreview(cameraController)
+          else
+            Container(color: Colors.black),
 
           /// BLUR ONLY OUTSIDE THE SCANNER AREA
           if (scannerRect != null)
@@ -622,10 +606,19 @@ class _ScannerScreenState
 
   Widget omniButton(
     BuildContext context,
-    CameraController cameraController,
+    CameraController? cameraController,
   ) {
     return GestureDetector(
       onTap: () {
+        if (cameraController == null || !cameraController.value.isInitialized) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Camera system is warming up...'),
+              duration: Duration(seconds: 1),
+            ),
+          );
+          return;
+        }
         Navigator.of(context).push(
           PageRouteBuilder(
             transitionDuration: Duration.zero,
