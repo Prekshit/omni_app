@@ -49,17 +49,17 @@ Future<void> main() async {
     cameras = [];
   }
 
-  runApp(const OmniApp());
+  runApp(const FetchApp());
 }
 
-class OmniApp extends StatelessWidget {
-  const OmniApp({super.key});
+class FetchApp extends StatelessWidget {
+  const FetchApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Omni',
+      title: 'Fetch',
       theme: ThemeData(
         fontFamily: 'Roboto',
       ),
@@ -488,7 +488,7 @@ class _ScannerScreenState
           const SizedBox(height: 10),
 
           const Text(
-            "Omni",
+            "Fetch",
             style: TextStyle(
               color: Colors.white,
               fontSize: 16,
@@ -3339,7 +3339,7 @@ class InvoiceScreen extends StatelessWidget {
       if (pngBytes == null) throw Exception('Failed to encode PNG');
 
       final orderId = _getOrderId();
-      final fileName = "Omni_Order_${orderId}.png";
+      final fileName = "Fetch_Order_${orderId}.png";
       
       final bool? success = await _nativeChannel.invokeMethod<bool>('saveImageToDownloads', {
         'bytes': pngBytes,
@@ -3373,7 +3373,7 @@ class InvoiceScreen extends StatelessWidget {
     final qtyLine = quantity > 1 ? 'Qty: $quantity × ${product.price}\n' : '';
     final text = """
 ========================================
-       OMNI RETAIL ORDER INVOICE
+       FETCH RETAIL ORDER INVOICE
 ========================================
 Order ID: #$orderId
 Date: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}
@@ -3404,7 +3404,7 @@ Thank you for choosing PhonePe Partner Checkout!
 
   String _getOrderId() {
     final int hash = (product.title + name).hashCode.abs();
-    return "OMN-${hash.toString().substring(0, 6)}";
+    return "FET-${hash.toString().substring(0, 6)}";
   }
 
   @override

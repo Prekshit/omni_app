@@ -40,7 +40,7 @@ class MainActivity : FlutterActivity() {
                         try {
                             val intent = Intent(Intent.ACTION_SEND).apply {
                                 type = "text/plain"
-                                putExtra(Intent.EXTRA_SUBJECT, "Omni Order Invoice")
+                                putExtra(Intent.EXTRA_SUBJECT, "Fetch Order Invoice")
                                 putExtra(Intent.EXTRA_TEXT, text)
                             }
                             val chooser = Intent.createChooser(intent, "Share Invoice via")
