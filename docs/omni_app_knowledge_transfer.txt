@@ -890,8 +890,6 @@ POTENTIAL FUTURE IMPROVEMENTS
 
   - Split main.dart into separate files (models/, screens/, widgets/, services/)
   - Add real caching (Redis or in-memory LRU) for repeated product scans
-  - Implement barcode/QR scanning (the button exists in UI but has no action yet)
-  - Implement gallery image picker (the button exists in UI but has no action yet)
   - Replace PhonePe demo checkout with a real PhonePe SDK integration
   - Persist cart/quantity across sessions (Supabase or local SQLite)
   - Add product detail page with price history graphs
@@ -900,6 +898,16 @@ POTENTIAL FUTURE IMPROVEMENTS
   - Add ML-based re-ranking to improve product relevance beyond score heuristics
   - Support multiple languages / regions (currently India-only biased)
 
+
+================================================================================
+20. RECENT UPDATES & IMPROVEMENTS (MAY 2026)
+================================================================================
+
+  - Camera Initialization Optimization: Deferred camera initialization to prevent startup delays.
+  - In-App Browser: Standard product cards open inside a custom in-app `ProductBrowserPage` with a styled floating bottom navigation bar.
+  - Gallery Flow Enhancements: Picked images are downscaled to 1080px to bypass memory freezes, and cropped images are downscaled to 512px for instant encoding. Null-safe camera controller handling prevents gallery crash bugs.
+  - Gallery and Barcode Scanner Actions: Both gallery image picker and QR/barcode scanning flows are now fully implemented and active.
+  - URL Redirects: Reverted an unstable direct URL rewrite feature for Google Shopping aggregator results to ensure users are sent to the correct product search page in the in-app browser.
 
 ================================================================================
 END OF DOCUMENT

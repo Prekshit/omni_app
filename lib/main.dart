@@ -203,19 +203,12 @@ class _ScannerScreenState
       final picker = ImagePicker();
       final pickedFile = await picker.pickImage(
         source: ImageSource.gallery,
-        imageQuality: 90,
+        maxWidth: 1080,
+        maxHeight: 1080,
+        imageQuality: 85,
       );
 
       if (pickedFile == null) return;
-
-      if (controller == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Camera system is warming up...')),
-          );
-        }
-        return;
-      }
 
       final imageBytes = await pickedFile.readAsBytes();
 
@@ -226,7 +219,7 @@ class _ScannerScreenState
           transitionDuration: Duration.zero,
           reverseTransitionDuration: Duration.zero,
           pageBuilder: (_, __, ___) => OmniScannerScreen(
-            controller: controller!,
+            controller: controller,
             preSelectedImageBytes: imageBytes,
           ),
         ),
@@ -802,13 +795,13 @@ enum _ScannerMode {
 class OmniScannerScreen extends StatefulWidget {
   const OmniScannerScreen({
     super.key,
-    required this.controller,
+    this.controller,
     this.getController,
     this.onBarcodeScan,
     this.preSelectedImageBytes,
   });
 
-  final CameraController controller;
+  final CameraController? controller;
   final CameraController? Function()? getController;
   final Future<void> Function(Future<void> Function() action, VoidCallback onResume)? onBarcodeScan;
   final Uint8List? preSelectedImageBytes;
@@ -821,7 +814,7 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
   static const Color scannerDarkPlum = Color(0xFF360816);
   bool isCapturing = false;
 
-  CameraController get controller => widget.getController?.call() ?? widget.controller;
+  CameraController? get controller => widget.getController?.call() ?? widget.controller;
 
   // ── Crop / sheet state ────────────────────────────────────────────────────
   _ScannerMode _scannerMode = _ScannerMode.liveCamera;
@@ -982,13 +975,17 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
 
   Widget _buildBackground() {
     if (_capturedImageBytes == null) {
+      final camCtrl = controller;
+      if (camCtrl == null || !camCtrl.value.isInitialized) {
+        return Container(color: Colors.black);
+      }
       return SizedBox.expand(
         child: FittedBox(
           fit: BoxFit.cover,
           child: SizedBox(
-            width: controller.value.previewSize?.height ?? 1,
-            height: controller.value.previewSize?.width ?? 1,
-            child: CameraPreview(controller),
+            width: camCtrl.value.previewSize?.height ?? 1,
+            height: camCtrl.value.previewSize?.width ?? 1,
+            child: CameraPreview(camCtrl),
           ),
         ),
       );
@@ -1344,16 +1341,28 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
     final dstW = srcRect.width.round().clamp(1, 9999999);
     final dstH = srcRect.height.round().clamp(1, 9999999);
 
+    // Speed optimization: downscale crop canvas to max 512px to avoid slow PNG encoding
+    double scale = 1.0;
+    if (dstW > 512 || dstH > 512) {
+      if (dstW > dstH) {
+        scale = 512 / dstW;
+      } else {
+        scale = 512 / dstH;
+      }
+    }
+    final finalW = (dstW * scale).round().clamp(1, 9999999);
+    final finalH = (dstH * scale).round().clamp(1, 9999999);
+
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     canvas.drawImageRect(
       img,
       srcRect,
-      Rect.fromLTWH(0, 0, dstW.toDouble(), dstH.toDouble()),
+      Rect.fromLTWH(0, 0, finalW.toDouble(), finalH.toDouble()),
       Paint(),
     );
     final picture = recorder.endRecording();
-    final croppedImg = await picture.toImage(dstW, dstH);
+    final croppedImg = await picture.toImage(finalW, finalH);
     final byteData = await croppedImg.toByteData(format: ui.ImageByteFormat.png);
     return byteData!.buffer.asUint8List();
   }
@@ -1492,7 +1501,8 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
   }
 
   void searchWithCamera() {
-    if (isCapturing || controller.value.isTakingPicture) return;
+    final camCtrl = controller;
+    if (isCapturing || camCtrl == null || camCtrl.value.isTakingPicture) return;
 
     // Reset crop state for a fresh scan
     _cropL = 0.10; _cropT = 0.10; _cropR = 0.90; _cropB = 0.90;
@@ -1512,7 +1522,9 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
       final picker = ImagePicker();
       final pickedFile = await picker.pickImage(
         source: ImageSource.gallery,
-        imageQuality: 90,
+        maxWidth: 1080,
+        maxHeight: 1080,
+        imageQuality: 85,
       );
 
       if (pickedFile == null) return;
@@ -1555,7 +1567,11 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
         imageBytes = croppedBytes;
       } else {
         // Initial capture — take photo and store original for future crops.
-        final photo = await controller.takePicture();
+        final camCtrl = controller;
+        if (camCtrl == null) {
+          throw Exception('Camera system is not ready.');
+        }
+        final photo = await camCtrl.takePicture();
         imageBytes = await photo.readAsBytes();
         // Store immediately so the UI shows the frozen image right away.
         if (mounted) setState(() => _capturedImageBytes = imageBytes);
@@ -1729,7 +1745,10 @@ class _OmniScannerScreenState extends State<OmniScannerScreen> {
 
   Future<void> resumeCameraPreview() async {
     try {
-      await controller.resumePreview();
+      final camCtrl = controller;
+      if (camCtrl != null) {
+        await camCtrl.resumePreview();
+      }
     } catch (_) {
       // Some devices keep preview running after capture, so resume can fail.
     }
@@ -2085,7 +2104,7 @@ class OmniProductsSheet extends StatelessWidget {
               ),
             );
           } else {
-            _nativeChannel.invokeMethod('launchUrl', {'url': product.shoppingLink});
+            ProductBrowserPage.show(context, product);
           }
         },
         borderRadius: BorderRadius.circular(18),
@@ -2537,7 +2556,7 @@ class CategoryProductsPage extends StatelessWidget {
               ),
             );
           } else {
-            _nativeChannel.invokeMethod('launchUrl', {'url': product.shoppingLink});
+            ProductBrowserPage.show(context, product);
           }
         },
         borderRadius: BorderRadius.circular(18),
@@ -4818,7 +4837,7 @@ class _FavoriteCard extends StatelessWidget {
               builder: (_) => PhonePeCheckoutScreen(product: product),
             ));
           } else {
-            _nativeChannel.invokeMethod('launchUrl', {'url': product.shoppingLink});
+            ProductBrowserPage.show(context, product);
           }
         },
         borderRadius: BorderRadius.circular(18),
@@ -4891,6 +4910,20 @@ class _FavoriteCard extends StatelessWidget {
 class ProductBrowserPage extends StatefulWidget {
   const ProductBrowserPage({super.key, required this.product});
   final OmniProduct product;
+
+  static void show(BuildContext context, OmniProduct product) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      enableDrag: false,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withOpacity(0.5),
+      builder: (context) => FractionallySizedBox(
+        heightFactor: 0.92,
+        child: ProductBrowserPage(product: product),
+      ),
+    );
+  }
 
   @override
   State<ProductBrowserPage> createState() => _ProductBrowserPageState();
@@ -5116,7 +5149,7 @@ class _ProductBrowserPageState extends State<ProductBrowserPage> {
                     ),
                   ),
 
-                // Floating glassmorphic rounded rectangular overlapping styled bottom bar
+                // Solid plum rounded rectangular footer bar overlapping the WebView
                 Positioned(
                   bottom: 24, // Beautifully overlapping on top of WebView
                   left: 20,
@@ -5124,9 +5157,8 @@ class _ProductBrowserPageState extends State<ProductBrowserPage> {
                   child: Container(
                     height: 56,
                     decoration: BoxDecoration(
-                      color: plum.withOpacity(0.88),
+                      color: plum, // Solid plum color
                       borderRadius: BorderRadius.circular(16), // Rounded rectangular design
-                      border: Border.all(color: Colors.white.withOpacity(0.18), width: 1.2),
                       boxShadow: [
                         BoxShadow(
                           color: Colors.black.withOpacity(0.3),
@@ -5135,50 +5167,44 @@ class _ProductBrowserPageState extends State<ProductBrowserPage> {
                         ),
                       ],
                     ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            _floatingFooterIcon(
-                              icon: Icons.arrow_back_ios_new_rounded,
-                              color: _canGoBack ? Colors.white : Colors.white30,
-                              onTap: _canGoBack ? () => _controller.goBack() : null,
-                            ),
-                            _floatingFooterIcon(
-                              icon: Icons.arrow_forward_ios_rounded,
-                              color: _canGoForward ? Colors.white : Colors.white30,
-                              onTap: _canGoForward ? () => _controller.goForward() : null,
-                            ),
-                            _floatingFooterIcon(
-                              icon: Icons.refresh_rounded,
-                              color: Colors.white,
-                              onTap: () => _controller.reload(),
-                            ),
-                            _floatingFooterIcon(
-                              icon: Icons.copy_all_rounded,
-                              color: Colors.white,
-                              onTap: () {
-                                Clipboard.setData(ClipboardData(text: widget.product.shoppingLink));
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Link copied to clipboard'),
-                                    behavior: SnackBarBehavior.floating,
-                                    duration: Duration(seconds: 2),
-                                  ),
-                                );
-                              },
-                            ),
-                            _floatingFooterIcon(
-                              icon: Icons.open_in_new_rounded,
-                              color: Colors.white,
-                              onTap: () => _nativeChannel.invokeMethod('launchUrl', {'url': widget.product.shoppingLink}),
-                            ),
-                          ],
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _floatingFooterIcon(
+                          icon: Icons.arrow_back_ios_new_rounded,
+                          color: _canGoBack ? Colors.white : Colors.white30,
+                          onTap: _canGoBack ? () => _controller.goBack() : null,
                         ),
-                      ),
+                        _floatingFooterIcon(
+                          icon: Icons.arrow_forward_ios_rounded,
+                          color: _canGoForward ? Colors.white : Colors.white30,
+                          onTap: _canGoForward ? () => _controller.goForward() : null,
+                        ),
+                        _floatingFooterIcon(
+                          icon: Icons.refresh_rounded,
+                          color: Colors.white,
+                          onTap: () => _controller.reload(),
+                        ),
+                        _floatingFooterIcon(
+                          icon: Icons.copy_all_rounded,
+                          color: Colors.white,
+                          onTap: () {
+                            Clipboard.setData(ClipboardData(text: widget.product.shoppingLink));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Link copied to clipboard'),
+                                behavior: SnackBarBehavior.floating,
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                          },
+                        ),
+                        _floatingFooterIcon(
+                          icon: Icons.open_in_new_rounded,
+                          color: Colors.white,
+                          onTap: () => _nativeChannel.invokeMethod('launchUrl', {'url': widget.product.shoppingLink}),
+                        ),
+                      ],
                     ),
                   ),
                 ),
