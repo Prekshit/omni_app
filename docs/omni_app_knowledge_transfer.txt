@@ -1,7 +1,7 @@
 ================================================================================
 OMNI APP – COMPLETE KNOWLEDGE TRANSFER DOCUMENT
 ================================================================================
-Version: May 2026
+Version: June 2026
 Project Root: C:\Projects\omni_app
 Author context: This document is intended for complete knowledge transfer (KT)
 to a new developer or AI agent continuing work on the Omni project.
@@ -29,6 +29,10 @@ TABLE OF CONTENTS
 17. Running the Project Locally
 18. Debugging & Logs
 19. Known Limitations & Future Work
+20. Barcode Search System (Waterfall Cascade)
+21. Firecrawl Product Details Scraping Pipeline
+22. Custom In-App Browser (ProductBrowserPage)
+23. Recent Updates & Improvements (June 2026)
 
 
 ================================================================================
@@ -900,14 +904,110 @@ POTENTIAL FUTURE IMPROVEMENTS
 
 
 ================================================================================
-20. RECENT UPDATES & IMPROVEMENTS (MAY 2026)
+20. BARCODE SEARCH SYSTEM (WATERFALL CASCADE)
+================================================================================
+
+Endpoint: POST /api/barcode-search
+  Input:   JSON body with field "barcode" (e.g., {"barcode": "8901030754854"})
+  Output:  JSON with keys: products, barcode, timingMs, categorySummary,
+           sourceSummary, categories
+
+The barcode search uses a parallel waterfall cascade matching strategy. When a
+barcode is scanned, the server executes queries against multiple databases in
+parallel via Promise.all() to maximize speed and product match coverage:
+
+  1. Open Food Facts Database (queryOpenFoodFacts)
+     - Target: FMCG, groceries, packaged foods.
+     - URL: https://world.openfoodfacts.org/api/v2/product/{barcode}.json
+     - Timeout: 3.5 seconds.
+     - Returns: Catalog product name, brand, quantity, and image.
+     - Type: Pure catalog metadata (returns empty price).
+
+  2. UPCItemDB Database (queryUpcItemDb)
+     - Target: General retail consumer goods, books, electronics.
+     - URL: https://api.upcitemdb.com/prod/trial/lookup?upc={barcode}
+     - Timeout: 4.0 seconds.
+     - Returns: Rich offer lists containing prices, specific merchant links,
+                product titles, and images.
+
+  3. Google Shopping exact match search (queryGoogleShopping)
+     - Target: Live scraped marketplace listings.
+     - Process: Executes search query '"' + barcode + '"' against the Google
+                Shopping engine via SerpApi.
+     - Timeout: 50.0 seconds.
+     - Returns: Exact match products found currently selling on active sites.
+
+Scoring and Normalization:
+  - All gathered product matches are merged and deduplicated.
+  - The merged product list is scored using scoreProducts() (giving higher base
+    scores to exact matches) and grouped into the 6 category buckets.
+  - Returns a unified JSON response matching the visual search schema.
+
+
+================================================================================
+21. FIRECRAWL PRODUCT DETAILS SCRAPING PIPELINE
+================================================================================
+
+Endpoint: POST /api/product-details
+  Input:   JSON body with field "url"
+  Output:  JSON scraped product details containing: productName, images,
+           description, specifications, sellerInfo, rating
+
+To enable rich checkout mockups, the app scrapes detailed product parameters:
+
+  1. Firecrawl Integration (backend/server.js)
+     - Employs Mendable's Firecrawl SDK: new FirecrawlApp({ apiKey: ... })
+     - Calls firecrawl.scrapeUrl(url, { formats: [{ type: 'json', schema: ... }] })
+     - Passes a strict JSON schema enforcing extraction of: productName,
+       images (array), description, specifications, sellerInfo, and rating.
+
+  2. Background Pre-Fetching (lib/main.dart)
+     - When visual search results are returned, the client automatically triggers
+       prefetchPhonePeProductDetails() for eligible PhonePe-branded products.
+     - Running as a queue-backed background thread, it calls the backend
+       /api/product-details endpoint, rate-limiting requests with a 2-second delay.
+     - Scraped details are cached in globalProductDetailsCache and globalProductLoadingCache
+       using ValueNotifier, ensuring that the details popup opens instantly when tapped.
+
+  3. Product Details Sheet UI (ProductDetailsSheet)
+     - Custom Plum modal sheet shown when the user taps on a PhonePe-branded card's
+       details in checkout.
+     - Displays an horizontal image gallery slider, ratings/reviews, dynamic spec table,
+       and detailed product descriptions extracted by Firecrawl.
+
+
+================================================================================
+22. CUSTOM IN-APP BROWSER (PRODUCTBROWSERPAGE)
+================================================================================
+
+Class: ProductBrowserPage extends StatefulWidget (lib/main.dart)
+Purpose: Replaces external browser redirects for non-PhonePe product listings
+         with a premium in-app viewing environment.
+
+UX Architecture & Custom UI Elements:
+  - Modal Sheet Presentation: Opens inside a FractionallySizedBox covering 92%
+    of the viewport height, preserving context and allowing instant dismissal.
+  - WebViewController (webview_flutter): Displays the direct merchant product link.
+  - Solid Plum Footer Bar: Floating rounded rectangular overlay container at the
+    bottom of the page containing 5 glassmorphic-styled action icons:
+      1. Go Back: Navigates back in history (disabled if at start).
+      2. Go Forward: Navigates forward in history.
+      3. Refresh: Reloads the page.
+      4. Copy URL: Copies the merchant link to clipboard (shows floating SnackBar).
+      5. Open in System Browser: Invokes MethodChannel 'launchUrl' to open the link
+         externally in Chrome/Safari chooser.
+
+
+================================================================================
+23. RECENT UPDATES & IMPROVEMENTS (JUNE 2026)
 ================================================================================
 
   - Camera Initialization Optimization: Deferred camera initialization to prevent startup delays.
-  - In-App Browser: Standard product cards open inside a custom in-app `ProductBrowserPage` with a styled floating bottom navigation bar.
+  - In-App Browser: Standard product cards open inside a custom in-app `ProductBrowserPage` with a solid plum rounded rectangular footer navigation bar.
   - Gallery Flow Enhancements: Picked images are downscaled to 1080px to bypass memory freezes, and cropped images are downscaled to 512px for instant encoding. Null-safe camera controller handling prevents gallery crash bugs.
   - Gallery and Barcode Scanner Actions: Both gallery image picker and QR/barcode scanning flows are now fully implemented and active.
   - URL Redirects: Reverted an unstable direct URL rewrite feature for Google Shopping aggregator results to ensure users are sent to the correct product search page in the in-app browser.
+  - Codebase KT Documentation alignment: Completely updated the architecture blueprints to capture waterfall barcode aggregation, Firecrawl product scraping, and custom in-app webview details.
 
 ================================================================================
 END OF DOCUMENT
